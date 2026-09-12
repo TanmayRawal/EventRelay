@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+export DEBIAN_FRONTEND=noninteractive
 
 echo "=================================================="
 echo "  Deploying EventRelay on AWS EC2 (Dockerized)"
@@ -17,8 +18,8 @@ fi
 
 # 2. Install Docker & Docker Compose
 echo "[2/6] Installing Docker & Docker Compose..."
-sudo apt-get update -y
-sudo apt-get install -y ca-certificates curl gnupg git
+sudo apt-get update -y -qq
+sudo apt-get install -y -qq -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" ca-certificates curl gnupg git
 
 if ! command -v docker &> /dev/null; then
   sudo install -m 0755 -d /etc/apt/keyrings

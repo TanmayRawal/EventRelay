@@ -1,4 +1,6 @@
-# EventRelay — Distributed Webhook Gateway & Fault-Tolerant Delivery Engine
+# EventRelay
+
+> Distributed webhook delivery engine with partitioned FIFO ordering, circuit breaking, and replay defense.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue.svg)](https://www.typescriptlang.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-20.x-green.svg)](https://nodejs.org/)
@@ -6,172 +8,150 @@
 [![Redis](https://img.shields.io/badge/Redis-7.x%20Streams-red.svg)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://www.docker.com/)
 [![CI Pipeline](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF.svg)](https://github.com/features/actions)
-[![Prometheus](https://img.shields.io/badge/Observability-Prometheus%20Metrics-E6522C.svg)](https://prometheus.io/)
+[![Prometheus](https://img.shields.io/badge/Metrics-Prometheus-E6522C.svg)](https://prometheus.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**EventRelay** is an enterprise-grade distributed webhook gateway and event delivery platform engineered for high-throughput, fault-tolerant asynchronous communication across microservices and external partner APIs. It guarantees **at-least-once delivery**, **zero duplicate event ingestion**, **partitioned FIFO message ordering**, and protects downstream destinations against cascading failures using **Circuit Breakers**, **Token Bucket Rate Limiting**, and **Exponential Backoff with Full Jitter**.
+EventRelay is an asynchronous webhook delivery gateway built with TypeScript, PostgreSQL, and Redis Streams. It handles high-throughput event ingestion, guarantees deduplication using idempotency keys, routes messages across virtual stream partitions for sequential delivery per entity, and isolates flaky destinations using circuit breakers and jittered retries.
 
 ---
 
-## 1. High-Level Design (HLD) Architecture
+## Architecture
 
 ```mermaid
 flowchart TD
-    Client[Enterprise Microservices / Clients] -->|POST /api/events with Idempotency-Key & Ordering-Key| API[EventRelay Ingestion Gateway]
-    
-    subgraph Ingestion & Partitioning Layer
-        API -->|Check Idempotency & Persist Event| PG[(PostgreSQL ACID Store)]
-        API -->|FNV-1a Hash Partitioning by Key| Partitioner[StreamPartitioner]
-        Partitioner -->|XADD to Virtual Shard| RS[(Redis Streams Sharded Event Bus)]
+    Client[Client / Service] -->|POST /api/events with Idempotency-Key| API[API Gateway]
+
+    subgraph Ingestion
+        API -->|Insert + Check Idempotency| PG[(PostgreSQL)]
+        API -->|FNV-1a Hash on orderingKey| Shard[Virtual Stream Partitioner]
+        Shard -->|XADD| RS[(Redis Streams)]
     end
 
-    subgraph Observability & Distributed Tracing
-        API -.->|W3C Trace Context Propagation| Trace[Correlation ID & OpenTelemetry]
-        API -.->|Scrape /metrics| Prom[Prometheus Telemetry Registry]
+    subgraph Dispatch Fleet
+        RS -->|XREADGROUP| W1[Delivery Worker 0]
+        RS -->|XREADGROUP| W2[Delivery Worker 1]
+        RS -->|XREADGROUP| WN[Delivery Worker N]
     end
 
-    subgraph Asynchronous Worker Fleet
-        RS -->|XREADGROUP| W1[Delivery Worker Shard 0]
-        RS -->|XREADGROUP| W2[Delivery Worker Shard 1]
-        RS -->|XREADGROUP| WN[Delivery Worker Shard N]
+    subgraph Resilience
+        W1 --> TB[Token Bucket Rate Limiter]
+        W1 --> CB[Circuit Breaker]
+        W1 --> HMAC[HMAC-SHA256 Signer]
     end
 
-    subgraph Resilience & Safety Layer
-        W1 --> TB[Token Bucket Rate Limiter via Redis Lua]
-        W1 --> CB[Circuit Breaker State Machine]
-        W1 --> Signer[HMAC-SHA256 Signer]
-    end
-
-    subgraph Downstream Destinations
-        Signer -->|HTTP POST with X-Signature| EP1[Partner Webhook Endpoint 200 OK]
-        Signer -->|HTTP 5xx / Timeout| EP2[Failing Endpoint]
-    end
-
-    subgraph Fault Recovery & Audit
-        EP2 -->|Failure Threshold Met| Trip[Trip Circuit to OPEN]
-        EP2 -->|Attempt < MaxRetries| Backoff[Full Jitter Retry Scheduler]
-        EP2 -->|Attempt >= MaxRetries| DLQ[(Dead-Letter Queue in PostgreSQL)]
-        DLQ -->|1-Click Manual Replay| AdminUI[React Operational Dashboard]
+    subgraph Destination
+        HMAC -->|HTTP POST| Target[Webhook Endpoint]
+        Target -->|5xx / Timeout| Retry[Full Jitter Retry Queue]
+        Retry -->|Max Attempts Reached| DLQ[(Dead Letter Queue)]
     end
 ```
 
 ---
 
-## 2. Advanced Engineering Capabilities
+## Core Components
 
-### A. Partitioned FIFO Ordering via Virtual Sharding
-In naive webhook systems, multi-threaded delivery can execute events out of order (e.g. `order.cancelled` arriving before `order.created`). EventRelay eliminates this via **deterministic entity hashing**:
-* Events carrying an `orderingKey` (e.g. `customerId`, `orderId`, or `accountId`) are hashed using the **32-bit FNV-1a algorithm** into virtual stream partitions (`eventrelay:stream:shard:{0..7}`).
-* Workers consume partitions sequentially per entity, guaranteeing strict FIFO order for a given entity while preserving massive parallel concurrency across distinct entities.
+### 1. Partitioned FIFO Ordering (Virtual Sharding)
+Events for the same account or resource often require strict execution order (for example, `order.created` must be delivered before `order.cancelled`). 
+- Incoming events provide an `orderingKey`.
+- A 32-bit FNV-1a hash maps this key to one of 8 virtual stream shards (`eventrelay:stream:shard:{0..7}`).
+- Shards are consumed sequentially by worker threads, preserving in-order delivery per entity while running distinct entities concurrently.
 
-### B. Circuit Breaker State Machine (State Pattern)
+### 2. Circuit Breaker
+When a destination server goes down, delivery threads risk hanging on timeouts and exhausting sockets:
+- **CLOSED**: Normal state. Failed dispatches increment the error counter.
+- **OPEN**: Trips after 5 consecutive failures. Subsequent requests fail immediately without network I/O.
+- **HALF_OPEN**: After a 30-second cooldown, a single probe request is sent. Success resets the circuit to `CLOSED`; failure returns it to `OPEN`.
 
-```mermaid
-stateDiagram-v2
-    [*] --> CLOSED
-    
-    CLOSED --> OPEN : 5 consecutive failures / 50% error rate
-    note right of CLOSED: Normal execution. Requests pass through. Failures are tallied.
-    
-    OPEN --> HALF_OPEN : Cool-down period expires (30 seconds)
-    note right of OPEN: Fast-fail. Requests rejected immediately without network I/O.
-    
-    HALF_OPEN --> CLOSED : Trial probe request returns HTTP 200 OK
-    HALF_OPEN --> OPEN : Trial probe request fails
-    note right of HALF_OPEN: Single probe request allowed through to test target recovery.
+### 3. HMAC-SHA256 Signing & Replay Defense
+Outgoing payloads are signed using the endpoint's pre-shared secret:
+- Header: `X-EventRelay-Signature: t=<timestamp>,v1=<hash>`
+- Receivers verify authenticity and reject signatures older than 300 seconds to prevent replay attacks.
+- Implemented with `crypto.timingSafeEqual` to avoid timing side-channel leaks.
+
+### 4. Exponential Backoff with Full Jitter
+To prevent retrying workers from overloading recovering services at regular intervals (the thundering herd problem), retry delays use full jitter:
+```
+delay = random(1, min(maxSeconds, baseSeconds * 2 ^ attempt))
 ```
 
-### C. Enterprise HMAC-SHA256 Payload Signing (Replay Attack Defense)
-Every outbound webhook is cryptographically signed with an HMAC-SHA256 signature to guarantee authenticity:
-* Header: `X-EventRelay-Signature: t={timestamp},v1={hex_digest}`
-* Replay Protection: Signatures enforce a strict 300-second timestamp tolerance, rejecting replayed requests.
-* Timing Attack Defense: Uses `crypto.timingSafeEqual` for constant-time signature verification.
-
-### D. Exponential Backoff with Full Jitter
-Eliminates the **thundering herd problem** using AWS/Google standard full jitter:
-$$\text{Delay} = \text{random}(0, \min(\text{MaxBackoff}, \text{Base} \times 2^{\text{attempt}}))$$
-
-### E. Prometheus Telemetry & Distributed Tracing
-* Dedicated `/metrics` endpoint exporting Prometheus counters and histograms (`eventrelay_events_ingested_total`, `eventrelay_delivery_duration_seconds_bucket`, `eventrelay_circuit_breaker_state`, `eventrelay_dlq_total`).
-* End-to-end `X-Correlation-ID` tracing across gateway ingestion, queue dispatch, and delivery.
+### 5. Prometheus Observability
+The server exposes Prometheus-compatible metrics on `/metrics`:
+- `eventrelay_events_ingested_total` (counter by event_type)
+- `eventrelay_deliveries_total` (counter by endpoint and status)
+- `eventrelay_delivery_duration_seconds` (histogram with latency buckets)
+- `eventrelay_circuit_breaker_state` (gauge: 0=CLOSED, 1=HALF_OPEN, 2=OPEN)
+- `eventrelay_dlq_total` (counter for dead-lettered messages)
 
 ---
 
-## 3. Performance & Load Benchmark
+## Benchmark Results
 
-EventRelay includes a built-in high-concurrency benchmark script (`scripts/load_test.js`):
+Ran 500 requests at 50 concurrent connections (`scripts/load_test.js`):
 
-```bash
-# Run benchmark with 50 concurrent workers and 500 requests
-node scripts/load_test.js
-```
-
-### Benchmark Results (Local Test Environment):
 | Metric | Result |
 | :--- | :--- |
-| **Throughput** | **1,250+ req/sec** |
-| **Ingestion Latency (p50)** | **4.2 ms** |
-| **Ingestion Latency (p99)** | **12.8 ms** |
-| **Duplicate Prevention** | **100.0%** (0 duplicates created under concurrent duplicate key bombardment) |
-| **Delivery Success Rate** | **99.98%** |
+| **Sustained Throughput** | **431 requests/sec** |
+| **Total Processed** | 500 requests |
+| **Deduplication Rate** | **100%** (50 deliberate duplicate keys blocked) |
+| **Failed Requests** | **0** (0% dropped events) |
+| **Ingestion Latency (p50)** | **104 ms** |
+| **Ingestion Latency (p90)** | **166 ms** |
+| **Ingestion Latency (p99)** | **307 ms** |
 
 ---
 
-## 4. Quickstart & Local Run
+## Local Setup
 
-### Step 1: Start Services with Docker Compose
+### Prerequisites
+- Docker and Docker Compose
+- Node.js 20+ (if running scripts locally)
+
+### 1. Start the cluster
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
-Spawns PostgreSQL (`5432`), Redis (`6379`), EventRelay Backend (`4000`), and Mock Webhook Receiver (`9000`).
+Containers started:
+- `eventrelay-backend` (port 4000)
+- `eventrelay-frontend` (port 3000)
+- `eventrelay-postgres` (port 5433)
+- `eventrelay-redis` (port 6380)
+- `eventrelay-mock-receiver` (port 9000)
 
-### Step 2: Ingest a Test Webhook Event
+### 2. Run automated verification suite
 ```bash
-curl -X POST http://localhost:4000/api/events \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: sample-uuid-001" \
-  -d '{
-    "eventType": "order.payment_completed",
-    "payload": {
-      "orderId": "ORD-12345",
-      "amount": 499.00,
-      "currency": "INR",
-      "customerId": "CUST-9901"
-    }
-  }'
-```
-
-### Step 3: View Prometheus Metrics
-```bash
-curl http://localhost:4000/metrics
+docker run --rm -v "${PWD}/scripts:/scripts" \
+  -e API_BASE="http://host.docker.internal:4000" \
+  -e MOCK_BASE="http://host.docker.internal:9000" \
+  -e FRONTEND_BASE="http://host.docker.internal:3000" \
+  node:20-alpine node /scripts/verify_all.js
 ```
 
-### Step 4: Launch the React Dashboard
+### 3. Run unit tests
 ```bash
-cd frontend
-npm install
-npm run dev
-# Open http://localhost:3000
+docker compose exec backend npm test
 ```
 
 ---
 
-## 5. Free Cloud Deployment (1-Click)
+## AWS Deployment (Single Command)
 
-EventRelay includes Infrastructure-as-Code (`render.yaml`) for **1-click free deployment** to [Render.com](https://render.com) or [Railway.app](https://railway.app).
+To deploy EventRelay to an AWS EC2 instance (`t3.micro` or `t3.small` running Ubuntu):
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for full instructions to get a live URL (`https://eventrelay-api.onrender.com`).
+```bash
+curl -sSL https://raw.githubusercontent.com/TanmayRawal/EventRelay/main/scripts/deploy-aws.sh | bash
+```
+
+The script configures Docker, sets up a 2GB swap partition for memory stability, pulls the repository, and spins up all 5 production containers.
 
 ---
 
-## 6. System Design Interview Defense FAQ
+## Design Decisions & Trade-offs
 
-| Interview Question | Technical Rationale & Answer |
+| Question | Rationale |
 | :--- | :--- |
-| **How does EventRelay handle out-of-order events?** | We implement **Partitioned FIFO Ordering**. Ingestion hashes an entity key (`customerId`, `orderId`) using FNV-1a to pin that entity's stream to a deterministic shard. A dedicated shard worker processes that entity sequentially, guaranteeing order without blocking other entities. |
-| **Why Redis Streams instead of RabbitMQ or Kafka?** | For an API delivery gateway requiring partition routing and sub-second dispatch, Redis Streams provides in-memory sub-millisecond throughput ($<1\text{ ms}$), built-in consumer groups (`XREADGROUP`), and message acknowledgment (`XACK`) with zero ZooKeeper/KRaft cluster complexity. |
-| **How do you prevent the Thundering Herd on retries?** | We apply **Full Jitter Exponential Backoff**. Rather than all retrying clients flooding a recovering downstream server at deterministic $2^n$ second intervals, delays are randomly distributed uniformly over $[0, 2^n]$, smoothing load spikes into a flat distribution. |
-| **Why is the Circuit Breaker crucial in an event gateway?** | If a downstream partner endpoint crashes, worker threads block on network timeouts ($5\text{ seconds}$), exhausting connection sockets and crashing the cluster. The Circuit Breaker trips to `OPEN` and fast-fails requests in $0\text{ ms}$, preserving thread availability. |
+| **Why Redis Streams instead of Kafka or RabbitMQ?** | Redis Streams provides sub-millisecond in-memory throughput, built-in consumer groups (`XREADGROUP`), and message acknowledgment (`XACK`) without the operational overhead of ZooKeeper/KRaft. For a webhook delivery engine processing hundreds of thousands of events per day, it is fast and resource-efficient. |
+| **How is state consistency maintained during ingestion?** | PostgreSQL transactions wrap both the event write and the initial delivery row insertions. Redis Streams receives the dispatch notification only after the database transaction commits, ensuring no phantom deliveries exist. |
+| **Why use Full Jitter instead of fixed backoff?** | Fixed exponential backoff causes retrying workers to synchronize their requests at exact intervals ($2\text{s}, 4\text{s}, 8\text{s}$), recreating spikes on recovering endpoints. Full jitter spreads attempts evenly across time intervals. |
 
 ---
 
