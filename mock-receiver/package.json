@@ -1,0 +1,12 @@
+{
+  "name": "eventrelay-mock-receiver",
+  "version": "1.0.0",
+  "description": "Mock webhook receiver for testing fault tolerance",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

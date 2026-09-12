@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eventrelay-postgres
+    environment:
+      POSTGRES_USER: eventrelay
+      POSTGRES_PASSWORD: eventrelay_secret
+      POSTGRES_DB: eventrelay_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventrelay -d eventrelay_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: eventrelay-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: eventrelay-backend
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://eventrelay:eventrelay_secret@postgres:5432/eventrelay_db
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  mock-receiver:
+    build:
+      context: ./mock-receiver
+      dockerfile: Dockerfile
+    container_name: eventrelay-mock-receiver
+    environment:
+      PORT: 9000
+    ports:
+      - "9000:9000"
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,34 @@
+# Render Blueprint (Infrastructure as Code)
+# Deploys EventRelay Backend, PostgreSQL, and Redis in 1 click
+services:
+  - type: web
+    name: eventrelay-api
+    runtime: node
+    plan: free
+    buildCommand: cd backend && npm install && npm run build
+    startCommand: cd backend && npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: eventrelay-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: eventrelay-redis
+          property: connectionString
+      - key: NODE_ENV
+        value: production
+
+  - type: redis
+    name: eventrelay-redis
+    plan: free
+    ipAllowList: [] # internal access only
+
+databases:
+  - name: eventrelay-db
+    plan: free
+    databaseName: eventrelay_db
+    user: eventrelay
