@@ -43,21 +43,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: 'projects/eventrelay/backend/package-lock.json'
 
-      - name: Install Dependencies
-        working-directory: ./projects/eventrelay/backend
-        run: npm ci
+      - name: Install Backend Dependencies
+        working-directory: ./backend
+        run: npm install
 
       - name: Run Unit Tests
-        working-directory: ./projects/eventrelay/backend
+        working-directory: ./backend
         run: npm test
 
-      - name: Build TypeScript Project
-        working-directory: ./projects/eventrelay/backend
+      - name: Build TypeScript Backend
+        working-directory: ./backend
         run: npm run build
 
-      - name: Validate Docker Build
-        working-directory: ./projects/eventrelay
+      - name: Install Frontend Dependencies & Build
+        working-directory: ./frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Validate Multi-Container Docker Build
         run: docker compose build
