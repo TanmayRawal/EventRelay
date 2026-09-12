@@ -4,6 +4,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: eventrelay-postgres
+    restart: always
     environment:
       POSTGRES_USER: eventrelay
       POSTGRES_PASSWORD: eventrelay_secret
@@ -22,6 +23,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: eventrelay-redis
+    restart: always
     ports:
       - "6379:6379"
     volumes:
@@ -38,11 +40,12 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: eventrelay-backend
+    restart: always
     environment:
       PORT: 4000
       DATABASE_URL: postgres://eventrelay:eventrelay_secret@postgres:5432/eventrelay_db
       REDIS_URL: redis://redis:6379
-      NODE_ENV: development
+      NODE_ENV: production
     ports:
       - "4000:4000"
     depends_on:
@@ -51,11 +54,23 @@ services:
       redis:
         condition: service_healthy
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: eventrelay-frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
   mock-receiver:
     build:
       context: ./mock-receiver
       dockerfile: Dockerfile
     container_name: eventrelay-mock-receiver
+    restart: always
     environment:
       PORT: 9000
     ports:
