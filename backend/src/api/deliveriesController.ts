@@ -42,11 +42,12 @@ export async function replayDelivery(req: Request, res: Response) {
     const delivery = resDelivery.rows[0];
 
     // Reset status to RETRYING and reset attempt number
-    await query(
+    const updatedRes = await query(
       `UPDATE deliveries
        SET status = 'RETRYING', error_message = 'Manual replay triggered via admin console',
            attempt_number = 1, next_retry_at = CURRENT_TIMESTAMP
-       WHERE id = $1`,
+       WHERE id = $1
+       RETURNING *`,
       [id]
     );
 
@@ -62,7 +63,8 @@ export async function replayDelivery(req: Request, res: Response) {
 
     return res.json({
       message: 'Delivery successfully queued for manual replay',
-      deliveryId: id
+      deliveryId: id,
+      delivery: updatedRes.rows[0]
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });

@@ -28,7 +28,9 @@ export async function ingestEvent(req: Request, res: Response) {
     const existing = await query(`SELECT * FROM events WHERE idempotency_key = $1`, [idempotencyKey]);
     if (existing.rows.length > 0) {
       return res.status(200).json({
+        success: true,
         message: 'Duplicate event detected (idempotent response)',
+        eventId: existing.rows[0].id,
         event: existing.rows[0],
         duplicate: true
       });
@@ -81,6 +83,7 @@ export async function ingestEvent(req: Request, res: Response) {
     }
 
     return res.status(201).json({
+      success: true,
       message: 'Event successfully ingested and queued for delivery',
       eventId: result.event.id,
       deliveriesQueued: result.deliveries.length
