@@ -6,6 +6,7 @@ import { calculateFullJitterDelay } from '../resilience/backoff';
 import { rateLimiter } from '../resilience/tokenBucket';
 import { hmacSigner } from '../crypto/hmacSigner';
 import { config } from '../config';
+import { metrics } from '../metrics/prometheus';
 
 export class DeliveryWorker {
   private isRunning: boolean = false;
@@ -117,6 +118,8 @@ export class DeliveryWorker {
 
       await query(`UPDATE events SET status = 'COMPLETED' WHERE id = $1`, [eventId]);
       await circuitBreaker.recordSuccess(endpoint.id);
+      metrics.incDelivery(endpoint.name, 'SUCCESS');
+      metrics.observeLatency(durationMs / 1000.0);
       console.log(`[DeliveryWorker] Delivery ${deliveryId} -> SUCCESS (${response.status}) in ${durationMs}ms`);
 
     } catch (err: any) {
@@ -127,6 +130,8 @@ export class DeliveryWorker {
         : err.message;
 
       console.error(`[DeliveryWorker] Delivery ${deliveryId} -> FAILED: ${errorMsg}`);
+      metrics.incDelivery(endpoint.name, 'FAILED');
+      metrics.observeLatency(durationMs / 1000.0);
       await circuitBreaker.recordFailure(endpoint.id);
 
       await this.handleFailure(
@@ -180,6 +185,7 @@ export class DeliveryWorker {
       );
 
       await query(`UPDATE events SET status = 'FAILED' WHERE id = $1`, [eventId]);
+      metrics.incDlq();
       console.warn(`[DeliveryWorker] Delivery ${deliveryId} transitioned to DEAD_LETTER (Max attempts exceeded)`);
     }
   }

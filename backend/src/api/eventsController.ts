@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { query, withTransaction } from '../db/client';
 import { streamQueue } from '../redis/streamQueue';
+import { metrics } from '../metrics/prometheus';
 
 const IngestEventSchema = z.object({
   eventType: z.string().min(1),
@@ -42,6 +43,7 @@ export async function ingestEvent(req: Request, res: Response) {
         [idempotencyKey, eventType, JSON.stringify(payload)]
       );
       const newEvent = eventInsert.rows[0];
+      metrics.incIngested(eventType);
 
       // Query active target endpoints
       let targetEndpointsQuery = `SELECT id FROM endpoints WHERE is_active = true`;

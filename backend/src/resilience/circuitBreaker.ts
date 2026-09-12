@@ -1,4 +1,5 @@
 import { query } from '../db/client';
+import { metrics } from '../metrics/prometheus';
 
 export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 
@@ -63,6 +64,7 @@ export class CircuitBreakerRegistry {
            WHERE endpoint_id = $1`,
           [endpointId]
         );
+        metrics.setCircuitState(endpointId, 'HALF_OPEN');
         return true; // Trial request permitted
       }
 
@@ -84,6 +86,7 @@ export class CircuitBreakerRegistry {
          WHERE endpoint_id = $1`,
         [endpointId]
       );
+      metrics.setCircuitState(endpointId, 'CLOSED');
     } else if (circuit.state === 'CLOSED' && circuit.failureCount > 0) {
       // Reset failure count on success
       await query(
@@ -108,6 +111,7 @@ export class CircuitBreakerRegistry {
          WHERE endpoint_id = $1`,
         [endpointId, newFailures]
       );
+      metrics.setCircuitState(endpointId, 'OPEN');
       return 'OPEN';
     } else {
       // Increment failure count
@@ -128,6 +132,7 @@ export class CircuitBreakerRegistry {
        WHERE endpoint_id = $1`,
       [endpointId]
     );
+    metrics.setCircuitState(endpointId, 'CLOSED');
   }
 }
 
