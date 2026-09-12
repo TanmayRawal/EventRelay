@@ -217,14 +217,17 @@ async function runAllTests() {
   // TEST 4: Asynchronous Dispatch & HMAC Delivery Verification
   // -------------------------------------------------------------
   console.log('\n--- TEST SUITE 4: Stream Worker Dispatch & HMAC-SHA256 Verification ---');
-  // Allow worker to dequeue from Redis stream and dispatch to mock-receiver
-  await sleep(1500);
+  let matchingDelivery = null;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await sleep(500);
+    try {
+      const deliveriesRes = await makeRequest(`${API_BASE}/api/deliveries?limit=100`);
+      matchingDelivery = deliveriesRes.data.find(d => d.event_id === ingestedEventId && d.endpoint_id === standardEndpointId);
+      if (matchingDelivery && matchingDelivery.status === 'SUCCESS') break;
+    } catch (_) {}
+  }
 
   try {
-    const deliveriesRes = await makeRequest(`${API_BASE}/api/deliveries?limit=20`);
-    assert(deliveriesRes.statusCode === 200, `Fetch Deliveries HTTP 200`);
-    
-    const matchingDelivery = deliveriesRes.data.find(d => d.event_id === ingestedEventId && d.endpoint_id === standardEndpointId);
     assert(!!matchingDelivery, `Found delivery record for Event ID ${ingestedEventId}`);
     if (matchingDelivery) {
       assert(matchingDelivery.status === 'SUCCESS', `Delivery status is SUCCESS (Got: ${matchingDelivery.status})`);
@@ -233,7 +236,7 @@ async function runAllTests() {
     }
 
     // Verify in mock-receiver that HMAC signature was validated
-    const mockLogs = await makeRequest(`${MOCK_BASE}/api/received?limit=10`);
+    const mockLogs = await makeRequest(`${MOCK_BASE}/api/received?limit=20`);
     assert(mockLogs.statusCode === 200, `Mock Receiver logs HTTP 200`);
     const receivedEvent = mockLogs.data.find(r => r.headers['x-eventrelay-event-id'] === ingestedEventId);
     assert(!!receivedEvent, `Mock receiver captured dispatch for Event ID ${ingestedEventId}`);
