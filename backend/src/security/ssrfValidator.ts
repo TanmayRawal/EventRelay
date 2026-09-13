@@ -1,9 +1,11 @@
 import dns from 'dns';
 import net from 'net';
+import http from 'http';
+import https from 'https';
 
 /**
  * Checks whether an IP address belongs to RFC 1918 private subnets,
- * loopback, link-local (cloud metadata), or reserved address space.
+ * loopback, link-local (cloud metadata), IPv4-mapped IPv6, or reserved address space.
  */
 export function isPrivateOrReservedIp(ip: string): boolean {
   if (net.isIPv4(ip)) {
@@ -32,6 +34,13 @@ export function isPrivateOrReservedIp(ip: string): boolean {
     return false;
   } else if (net.isIPv6(ip)) {
     const normalized = ip.toLowerCase();
+
+    // IPv4-mapped IPv6 addresses (e.g., ::ffff:127.0.0.1, ::ffff:169.254.169.254)
+    if (normalized.startsWith('::ffff:')) {
+      const ipv4Part = normalized.slice(7);
+      return isPrivateOrReservedIp(ipv4Part);
+    }
+
     // ::1 (Loopback)
     if (normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') return true;
     // :: (Unspecified)
@@ -49,7 +58,7 @@ export function isPrivateOrReservedIp(ip: string): boolean {
 /**
  * Validates endpoint URL against SSRF vulnerabilities:
  * - Restricts protocol to HTTP/HTTPS (requires HTTPS in production unless explicitly overridden)
- * - Resolves DNS and blocks private RFC 1918, loopback, and cloud metadata (169.254.169.254) IPs
+ * - Resolves all DNS records and enforces that every answer is non-private
  */
 export async function validateEndpointUrl(urlString: string): Promise<{ valid: boolean; error?: string }> {
   let parsed: URL;
@@ -76,13 +85,30 @@ export async function validateEndpointUrl(urlString: string): Promise<{ valid: b
       return { valid: false, error: 'SSRF Protection: Access to localhost is blocked.' };
     }
 
-    try {
-      const lookupResult = await dns.promises.lookup(hostname);
-      if (isPrivateOrReservedIp(lookupResult.address)) {
+    if (net.isIP(hostname)) {
+      if (isPrivateOrReservedIp(hostname)) {
         return {
           valid: false,
-          error: `SSRF Protection: Destination resolved to private/reserved IP address (${lookupResult.address}). Access blocked.`
+          error: `SSRF Protection: Target IP (${hostname}) is in private/reserved address space. Access blocked.`
         };
+      }
+      return { valid: true };
+    }
+
+    try {
+      // Validate EVERY DNS record returned (A and AAAA)
+      const lookupResults = await dns.promises.lookup(hostname, { all: true });
+      if (!lookupResults || lookupResults.length === 0) {
+        return { valid: false, error: `DNS resolution returned no addresses for hostname '${hostname}'` };
+      }
+
+      for (const record of lookupResults) {
+        if (isPrivateOrReservedIp(record.address)) {
+          return {
+            valid: false,
+            error: `SSRF Protection: Destination resolved to private/reserved IP address (${record.address}). Access blocked.`
+          };
+        }
       }
     } catch (err: any) {
       return { valid: false, error: `DNS resolution failed for hostname '${hostname}': ${err.message}` };
@@ -90,4 +116,61 @@ export async function validateEndpointUrl(urlString: string): Promise<{ valid: b
   }
 
   return { valid: true };
+}
+
+/**
+ * Creates custom http and https Agents configured with a secure socket-level DNS resolver.
+ * - Resolves all DNS records for the host.
+ * - Enforces that every resolved address is non-private.
+ * - Pins the outbound TCP socket to the validated IP address, completely eliminating
+ *   the Time-of-Check to Time-of-Use (TOCTOU) DNS rebinding attack window.
+ */
+export function createSecureAgents() {
+  const allowPrivate = process.env.ALLOW_PRIVATE_ENDPOINTS === 'true';
+
+  const secureLookup = (
+    hostname: string,
+    options: any,
+    callback: (err: Error | null, address?: any, family?: number) => void
+  ) => {
+    // If hostname is directly an IP literal
+    if (net.isIP(hostname)) {
+      if (!allowPrivate && isPrivateOrReservedIp(hostname)) {
+        return callback(new Error(`SSRF Protection: Direct connection to private/reserved IP (${hostname}) is blocked.`));
+      }
+      return callback(null, hostname, net.isIPv4(hostname) ? 4 : 6);
+    }
+
+    // Resolve all DNS records (IPv4 and IPv6)
+    dns.lookup(hostname, { all: true }, (err, addresses) => {
+      if (err) return callback(err);
+      if (!addresses || addresses.length === 0) {
+        return callback(new Error(`DNS resolution returned no addresses for hostname '${hostname}'`));
+      }
+
+      if (!allowPrivate) {
+        // Enforce SSRF boundary across EVERY DNS answer returned
+        for (const record of addresses) {
+          if (isPrivateOrReservedIp(record.address)) {
+            return callback(
+              new Error(`SSRF Protection: Hostname '${hostname}' resolved to private/reserved IP address (${record.address}). Access blocked.`)
+            );
+          }
+        }
+      }
+
+      // Pin outbound socket connection to the first verified address
+      const pinned = addresses[0];
+      if (options && options.all) {
+        callback(null, addresses as any);
+      } else {
+        callback(null, pinned.address, pinned.family);
+      }
+    });
+  };
+
+  return {
+    httpAgent: new http.Agent({ lookup: secureLookup as any, keepAlive: false }),
+    httpsAgent: new https.Agent({ lookup: secureLookup as any, keepAlive: false })
+  };
 }

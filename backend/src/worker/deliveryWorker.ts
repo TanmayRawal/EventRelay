@@ -10,12 +10,13 @@ import { metrics } from '../metrics/prometheus';
 import { ShardLeaseCoordinator } from './shardLeaseCoordinator';
 import { partitioner } from '../sharding/partitioner';
 import { syncEventStatus } from '../db/eventStatus';
-import { validateEndpointUrl } from '../security/ssrfValidator';
+import { validateEndpointUrl, createSecureAgents } from '../security/ssrfValidator';
 
 export class DeliveryWorker {
   private isRunning: boolean = false;
   private workerId: string;
   private leaseCoordinator: ShardLeaseCoordinator;
+  private secureAgents = createSecureAgents();
 
   constructor(workerId: string = config.consumerName) {
     this.workerId = workerId;
@@ -190,7 +191,9 @@ export class DeliveryWorker {
       const response = await axios.post(endpoint.url, event.payload, {
         headers,
         timeout: endpoint.timeout_ms,
-        maxRedirects: 0 // Webhooks must not follow redirects to protect against redirect SSRF
+        maxRedirects: 0, // Webhooks must not follow redirects to protect against redirect SSRF
+        httpAgent: this.secureAgents.httpAgent,
+        httpsAgent: this.secureAgents.httpsAgent
       });
 
       const durationMs = Date.now() - startTime;

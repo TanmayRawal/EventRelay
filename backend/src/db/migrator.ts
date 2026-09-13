@@ -62,8 +62,12 @@ export const MIGRATIONS: Migration[] = [
           endpoint_id UUID PRIMARY KEY REFERENCES endpoints(id) ON DELETE CASCADE,
           state VARCHAR(32) NOT NULL DEFAULT 'CLOSED',
           failure_count INTEGER NOT NULL DEFAULT 0,
+          success_count INTEGER NOT NULL DEFAULT 0,
+          threshold_failures INTEGER NOT NULL DEFAULT 5,
+          cool_down_seconds INTEGER NOT NULL DEFAULT 30,
+          opened_at TIMESTAMP WITH TIME ZONE,
           last_failure_at TIMESTAMP WITH TIME ZONE,
-          last_state_change TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `
   },
@@ -92,6 +96,18 @@ export const MIGRATIONS: Migration[] = [
     name: 'add_no_targets_status',
     sql: `
       COMMENT ON COLUMN events.status IS 'PENDING, PROCESSING, COMPLETED, FAILED, PARTIAL_SUCCESS, NO_TARGETS';
+    `
+  },
+  {
+    version: '004',
+    name: 'align_circuit_breakers',
+    sql: `
+      ALTER TABLE circuit_breakers
+      ADD COLUMN IF NOT EXISTS success_count INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS threshold_failures INTEGER NOT NULL DEFAULT 5,
+      ADD COLUMN IF NOT EXISTS cool_down_seconds INTEGER NOT NULL DEFAULT 30,
+      ADD COLUMN IF NOT EXISTS opened_at TIMESTAMP WITH TIME ZONE,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
     `
   }
 ];
