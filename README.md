@@ -13,6 +13,8 @@
 
 EventRelay is an asynchronous webhook delivery gateway built with TypeScript, PostgreSQL, and Redis Streams. It handles high-throughput event ingestion, guarantees deduplication using idempotency keys, routes messages across virtual stream partitions for sequential delivery per entity, and isolates flaky destinations using circuit breakers and jittered retries.
 
+![EventRelay Live Operational Dashboard](app_screenshot.png)
+
 ---
 
 ## Architecture
