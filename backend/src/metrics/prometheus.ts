@@ -1,5 +1,5 @@
 /**
- * Enterprise Prometheus Metrics Exporter
+ * Prometheus Metrics Exporter
  * Formats in-memory counters and latency histograms into the official
  * Prometheus text exposition format without requiring heavyweight native dependencies.
  */

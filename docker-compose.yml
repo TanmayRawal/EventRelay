@@ -45,6 +45,7 @@ services:
       REDIS_URL: redis://redis:6379
       EVENTRELAY_API_KEY: ${EVENTRELAY_API_KEY:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      INGESTION_RATE_LIMIT_RPS: ${INGESTION_RATE_LIMIT_RPS:-1000}
       NODE_ENV: production
     ports:
       - "4000:4000"

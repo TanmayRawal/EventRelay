@@ -35,7 +35,7 @@ export const Header: React.FC<HeaderProps> = ({
           </h1>
         </div>
         <p className="text-slate-400 text-sm mt-1">
-          Enterprise event delivery with Redis Streams, Circuit Breaker failover, and Dead-Letter Queue replay.
+          Distributed event delivery with Redis Streams, Circuit Breaker failover, and Dead-Letter Queue replay.
         </p>
 
         {/* API Key Status / Editor */}

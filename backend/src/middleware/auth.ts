@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { config } from '../config';
 
 /**
- * Enterprise API Key Authentication Middleware.
+ * API Key Authentication Middleware.
  * Compares provided Bearer / X-API-Key against configured secret using
  * crypto.timingSafeEqual to defend against side-channel timing attacks.
  */

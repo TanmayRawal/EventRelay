@@ -21,12 +21,14 @@ function postEvent(idempotencyKey, eventType, payload) {
     const data = JSON.stringify({ eventType, payload });
     const startTime = Date.now();
 
+    const apiKey = process.env.EVENTRELAY_API_KEY || 'er_secure_local_dev_key_8921';
     const req = http.request(TARGET_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(data),
-        'Idempotency-Key': idempotencyKey
+        'Idempotency-Key': idempotencyKey,
+        'X-API-Key': apiKey
       }
     }, (res) => {
       let body = '';

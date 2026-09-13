@@ -64,7 +64,7 @@ Events for the same account or resource often require strict execution order (fo
 - Manual delivery replays (`POST /api/deliveries/:id/replay`) query the original event's `ordering_key` to republish into the exact same shard.
 
 ### 2. Security Boundary: Timing-Safe API Key Auth & Inbound Throttling
-Mutating gateway operations (`POST /api/events`, `POST /api/endpoints`, DLQ replay, circuit resets) are guarded by enterprise security controls:
+Mutating gateway operations (`POST /api/events`, `POST /api/endpoints`, DLQ replay, circuit resets) are guarded by production security controls:
 - **Timing-Safe Key Verification**: Uses `crypto.timingSafeEqual` against `EVENTRELAY_API_KEY` (via `X-API-Key` or `Authorization: Bearer`) to defend against side-channel timing attacks.
 - **Inbound Rate Limiter**: A sliding-window token bucket throttles ingestion requests per caller (IP or API Key) to prevent socket starvation and queue flooding.
 - **Non-Root Container Security**: Docker images run as the unprivileged `node` user (`UID 1000`).
@@ -110,13 +110,13 @@ Ran 500 requests at 50 concurrent connections (`scripts/load_test.js`):
 
 | Metric | Result |
 | :--- | :--- |
-| **Sustained Throughput** | **431 requests/sec** |
+| **Sustained Throughput** | **394 requests/sec** |
 | **Total Processed** | 500 requests |
 | **Deduplication Rate** | **100%** (50 deliberate duplicate keys blocked) |
 | **Failed Requests** | **0** (0% dropped events) |
-| **Ingestion Latency (p50)** | **104 ms** |
-| **Ingestion Latency (p90)** | **166 ms** |
-| **Ingestion Latency (p99)** | **307 ms** |
+| **Ingestion Latency (p50)** | **131 ms** |
+| **Ingestion Latency (p90)** | **147 ms** |
+| **Ingestion Latency (p99)** | **213 ms** |
 
 ---
 

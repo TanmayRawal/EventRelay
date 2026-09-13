@@ -287,9 +287,17 @@ async function runAllTests() {
     }
 
     // Verify in mock-receiver that HMAC signature was validated
-    const mockLogs = await makeRequest(`${MOCK_BASE}/api/received?limit=20`, { noAuth: true });
+    let receivedEvent = null;
+    let mockLogs = null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      mockLogs = await makeRequest(`${MOCK_BASE}/api/received?limit=200`, { noAuth: true });
+      if (mockLogs.statusCode === 200 && Array.isArray(mockLogs.data)) {
+        receivedEvent = mockLogs.data.find(r => r.headers['x-eventrelay-event-id'] === ingestedEventId);
+        if (receivedEvent) break;
+      }
+      await sleep(400);
+    }
     assert(mockLogs.statusCode === 200, `Mock Receiver logs HTTP 200`);
-    const receivedEvent = mockLogs.data.find(r => r.headers['x-eventrelay-event-id'] === ingestedEventId);
     assert(!!receivedEvent, `Mock receiver captured dispatch for Event ID ${ingestedEventId}`);
     if (receivedEvent) {
       assert(!!receivedEvent.headers['x-eventrelay-signature'], `Payload contains HMAC-SHA256 signature header`);
@@ -317,12 +325,22 @@ async function runAllTests() {
       });
     }
 
-    await sleep(2500);
+    let outageCircuit = null;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await sleep(500);
+      try {
+        const circuitsRes = await makeRequest(`${API_BASE}/api/circuits`);
+        if (circuitsRes.statusCode === 200) {
+          outageCircuit = circuitsRes.data.find(c => c.endpoint_id === outageEndpointId);
+          if (outageCircuit && outageCircuit.state === 'OPEN') break;
+        }
+      } catch (_) {}
+    }
 
     const circuitsRes = await makeRequest(`${API_BASE}/api/circuits`);
     assert(circuitsRes.statusCode === 200, `Fetch Circuit Breakers HTTP 200`);
     
-    const outageCircuit = circuitsRes.data.find(c => c.endpoint_id === outageEndpointId);
+    outageCircuit = circuitsRes.data.find(c => c.endpoint_id === outageEndpointId);
     assert(!!outageCircuit, `Found circuit record for outage endpoint`);
     if (outageCircuit) {
       assert(outageCircuit.state === 'OPEN', `Circuit Breaker state TRIPPED to OPEN (Got: ${outageCircuit.state})`);
