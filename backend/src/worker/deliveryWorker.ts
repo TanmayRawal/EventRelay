@@ -10,6 +10,7 @@ import { metrics } from '../metrics/prometheus';
 import { ShardLeaseCoordinator } from './shardLeaseCoordinator';
 import { partitioner } from '../sharding/partitioner';
 import { syncEventStatus } from '../db/eventStatus';
+import { validateEndpointUrl } from '../security/ssrfValidator';
 
 export class DeliveryWorker {
   private isRunning: boolean = false;
@@ -156,7 +157,23 @@ export class DeliveryWorker {
       return;
     }
 
-    // 4. Sign Payload with HMAC-SHA256
+    // 4. SSRF Defense: Re-validate endpoint URL at dispatch time (prevents DNS rebinding and redirect attacks)
+    const ssrfCheck = await validateEndpointUrl(endpoint.url);
+    if (!ssrfCheck.valid) {
+      console.error(`[DeliveryWorker] SSRF violation on delivery ${deliveryId}: ${ssrfCheck.error}`);
+      await this.handleFailure(
+        deliveryId,
+        eventId,
+        endpoint,
+        attemptNumber,
+        400,
+        `SSRF Protection: ${ssrfCheck.error}`
+      );
+      await streamQueue.acknowledge(streamName, messageId);
+      return;
+    }
+
+    // 5. Sign Payload with HMAC-SHA256
     const rawPayload = JSON.stringify(event.payload);
     const headers = {
       'Content-Type': 'application/json',
@@ -167,12 +184,13 @@ export class DeliveryWorker {
       ...hmacSigner.sign(rawPayload, endpoint.secret_key)
     };
 
-    // 5. Execute HTTP Dispatch
+    // 6. Execute HTTP Dispatch
     const startTime = Date.now();
     try {
       const response = await axios.post(endpoint.url, event.payload, {
         headers,
-        timeout: endpoint.timeout_ms
+        timeout: endpoint.timeout_ms,
+        maxRedirects: 0 // Webhooks must not follow redirects to protect against redirect SSRF
       });
 
       const durationMs = Date.now() - startTime;

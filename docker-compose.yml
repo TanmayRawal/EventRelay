@@ -46,8 +46,8 @@ services:
       EVENTRELAY_API_KEY: ${EVENTRELAY_API_KEY:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       INGESTION_RATE_LIMIT_RPS: ${INGESTION_RATE_LIMIT_RPS:-1000}
-      ALLOW_PRIVATE_ENDPOINTS: "true"
-      ALLOW_HTTP_ENDPOINTS: "true"
+      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-false}
+      ALLOW_HTTP_ENDPOINTS: ${ALLOW_HTTP_ENDPOINTS:-false}
       NODE_ENV: production
     ports:
       - "4000:4000"
@@ -61,12 +61,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      args:
-        VITE_API_KEY: ${EVENTRELAY_API_KEY:-}
     container_name: eventrelay-frontend
     restart: always
-    environment:
-      VITE_API_KEY: ${EVENTRELAY_API_KEY:-}
     ports:
       - "3000:80"
     depends_on:

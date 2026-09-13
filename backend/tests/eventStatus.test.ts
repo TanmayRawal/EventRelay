@@ -81,12 +81,17 @@ describe('syncEventStatus (Aggregate Fan-Out Event Status Derivation)', () => {
     );
   });
 
-  it('should return null when event has no child deliveries', async () => {
-    mockClient.query.mockResolvedValueOnce({ rows: [] });
+  it('should transition event to NO_TARGETS when event has no child deliveries', async () => {
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rowCount: 1 });
 
     const status = await syncEventStatus('event-uuid-empty', mockClient as any);
 
-    expect(status).toBeNull();
-    expect(mockClient.query).toHaveBeenCalledTimes(1);
+    expect(status).toBe('NO_TARGETS');
+    expect(mockClient.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE events SET status = $1'),
+      ['NO_TARGETS', 'event-uuid-empty']
+    );
   });
 });

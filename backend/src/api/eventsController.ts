@@ -59,6 +59,13 @@ export async function ingestEvent(req: Request, res: Response) {
       }
 
       const endpoints = await client.query(targetEndpointsQuery, queryParams);
+
+      if (endpoints.rows.length === 0) {
+        await client.query(`UPDATE events SET status = 'NO_TARGETS' WHERE id = $1`, [newEvent.id]);
+        newEvent.status = 'NO_TARGETS';
+        return { isDuplicate: false, event: newEvent, deliveries: [] };
+      }
+
       const createdDeliveries = [];
 
       // 3. Atomically write Delivery rows and Transactional Outbox entries

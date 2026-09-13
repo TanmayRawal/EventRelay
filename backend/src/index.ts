@@ -12,6 +12,8 @@ import { retryScheduler } from './worker/retryScheduler';
 import { requireApiKey } from './middleware/auth';
 import { inboundRateLimiter } from './middleware/rateLimit';
 import { metrics } from './metrics/prometheus';
+import { runMigrations } from './db/migrator';
+import { outboxPublisher } from './worker/outboxPublisher';
 
 const app = express();
 
@@ -40,13 +42,11 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Prometheus Metrics Scraping Endpoint
-app.get('/metrics', (req, res) => {
+// Prometheus Metrics Scraping Endpoint (Guarded by API Key)
+app.get('/metrics', requireApiKey, (req, res) => {
   res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(metrics.exportPrometheus());
 });
-
-import { outboxPublisher } from './worker/outboxPublisher';
 
 // Event APIs
 app.post('/api/events', requireApiKey, inboundRateLimiter, ingestEvent);
@@ -66,6 +66,9 @@ app.post('/api/circuits/:endpointId/reset', requireApiKey, resetCircuit);
 
 async function bootstrap() {
   try {
+    // 0. Run Database Migrations to guarantee schema consistency
+    await runMigrations();
+
     // 1. Initialize Redis Streams Consumer Group across all shards
     await streamQueue.initGroup();
 

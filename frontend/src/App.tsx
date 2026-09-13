@@ -14,9 +14,9 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Authentication Key State (No public hardcoded default)
+  // Authentication Key State (Client-side operator key stored in localStorage)
   const [apiKey, setApiKey] = useState<string>(() => {
-    return localStorage.getItem('eventrelay_api_key') || (import.meta as any).env?.VITE_API_KEY || '';
+    return localStorage.getItem('eventrelay_api_key') || '';
   });
 
   const handleUpdateApiKey = (newKey: string) => {

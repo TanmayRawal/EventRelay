@@ -377,10 +377,15 @@ async function runAllTests() {
   // -------------------------------------------------------------
   console.log('\n--- TEST SUITE 8: Prometheus Live Telemetry Scrape ---');
   try {
-    const metricsRes = await makeRequest(`${API_BASE}/metrics`, { noAuth: true });
-    assert(metricsRes.statusCode === 200, `Prometheus /metrics endpoint HTTP 200`);
+    // Test unauthenticated /metrics request is rejected with 401
+    const unauthMetrics = await makeRequest(`${API_BASE}/metrics`, { noAuth: true });
+    assert(unauthMetrics.statusCode === 401, `Unauthenticated /metrics rejected with HTTP 401 (Got: ${unauthMetrics.statusCode})`);
+
+    // Test authenticated /metrics request succeeds with 200
+    const metricsRes = await makeRequest(`${API_BASE}/metrics`);
+    assert(metricsRes.statusCode === 200, `Authenticated Prometheus /metrics endpoint HTTP 200`);
     assert(metricsRes.headers['content-type'].includes('text/plain'), `Prometheus exposition Content-Type text/plain`);
-    const body = metricsRes.data;
+    const body = typeof metricsRes.data === 'string' ? metricsRes.data : JSON.stringify(metricsRes.data);
     assert(body.includes('eventrelay_events_ingested_total'), `Exports eventrelay_events_ingested_total counter`);
     assert(body.includes('eventrelay_deliveries_total'), `Exports eventrelay_deliveries_total counter`);
     assert(body.includes('eventrelay_delivery_duration_seconds_bucket'), `Exports latency histogram buckets`);

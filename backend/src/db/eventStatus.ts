@@ -1,7 +1,7 @@
 import { PoolClient } from 'pg';
 import { query } from './client';
 
-export type EventAggregateStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'PARTIAL_SUCCESS';
+export type EventAggregateStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'PARTIAL_SUCCESS' | 'NO_TARGETS';
 
 /**
  * Synchronizes the aggregate status of an event based on the status of all its child deliveries.
@@ -9,8 +9,9 @@ export type EventAggregateStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAI
  * - All DEAD_LETTER -> FAILED
  * - Any RETRYING or PENDING -> PROCESSING
  * - Both SUCCESS and DEAD_LETTER (with no remaining RETRYING) -> PARTIAL_SUCCESS
+ * - Zero child deliveries -> NO_TARGETS
  */
-export async function syncEventStatus(eventId: string, client?: PoolClient): Promise<EventAggregateStatus | null> {
+export async function syncEventStatus(eventId: string, client?: PoolClient): Promise<EventAggregateStatus> {
   const runner = client ? client.query.bind(client) : query;
 
   const res = await runner(
@@ -22,7 +23,11 @@ export async function syncEventStatus(eventId: string, client?: PoolClient): Pro
   );
 
   if (res.rows.length === 0) {
-    return null;
+    await runner(
+      `UPDATE events SET status = $1 WHERE id = $2`,
+      ['NO_TARGETS', eventId]
+    );
+    return 'NO_TARGETS';
   }
 
   let successCount = 0;
