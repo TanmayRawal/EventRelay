@@ -7,7 +7,8 @@ import { metrics } from '../metrics/prometheus';
 const IngestEventSchema = z.object({
   eventType: z.string().min(1),
   payload: z.record(z.any()),
-  endpointIds: z.array(z.string().uuid()).optional()
+  endpointIds: z.array(z.string().uuid()).optional(),
+  orderingKey: z.string().optional()
 });
 
 export async function ingestEvent(req: Request, res: Response) {
@@ -21,7 +22,7 @@ export async function ingestEvent(req: Request, res: Response) {
     return res.status(400).json({ error: parseResult.error.format() });
   }
 
-  const { eventType, payload, endpointIds } = parseResult.data;
+  const { eventType, payload, endpointIds, orderingKey } = parseResult.data;
 
   try {
     // 1. Check Idempotency Cache
@@ -39,10 +40,10 @@ export async function ingestEvent(req: Request, res: Response) {
     // 2. Ingest Event & Fan-Out Deliveries in a Transaction
     const result = await withTransaction(async (client) => {
       const eventInsert = await client.query(
-        `INSERT INTO events (idempotency_key, event_type, payload, status)
-         VALUES ($1, $2, $3, 'PROCESSING')
+        `INSERT INTO events (idempotency_key, event_type, payload, status, ordering_key)
+         VALUES ($1, $2, $3, 'PROCESSING', $4)
          RETURNING *`,
-        [idempotencyKey, eventType, JSON.stringify(payload)]
+        [idempotencyKey, eventType, JSON.stringify(payload), orderingKey || null]
       );
       const newEvent = eventInsert.rows[0];
       metrics.incIngested(eventType);
@@ -72,14 +73,14 @@ export async function ingestEvent(req: Request, res: Response) {
       return { event: newEvent, deliveries: createdDeliveries };
     });
 
-    // 3. Dispatch delivery jobs to Redis Streams
+    // 3. Dispatch delivery jobs to Partitioned Redis Streams
     for (const delivery of result.deliveries) {
       await streamQueue.publish({
         deliveryId: delivery.id,
         eventId: result.event.id,
         endpointId: delivery.endpoint_id,
         attemptNumber: 1
-      });
+      }, orderingKey);
     }
 
     return res.status(201).json({

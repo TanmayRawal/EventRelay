@@ -8,6 +8,8 @@ import { listDeliveries, replayDelivery } from './api/deliveriesController';
 import { listCircuits, resetCircuit } from './api/circuitController';
 import { streamQueue } from './redis/streamQueue';
 import { deliveryWorker } from './worker/deliveryWorker';
+import { retryScheduler } from './worker/retryScheduler';
+import { requireApiKey } from './middleware/auth';
 import { metrics } from './metrics/prometheus';
 
 const app = express();
@@ -40,24 +42,24 @@ app.get('/metrics', (req, res) => {
 });
 
 // Event APIs
-app.post('/api/events', ingestEvent);
+app.post('/api/events', requireApiKey, ingestEvent);
 app.get('/api/events', listEvents);
 
 // Endpoint APIs
-app.post('/api/endpoints', createEndpoint);
+app.post('/api/endpoints', requireApiKey, createEndpoint);
 app.get('/api/endpoints', listEndpoints);
 
 // Delivery & DLQ Replay APIs
 app.get('/api/deliveries', listDeliveries);
-app.post('/api/deliveries/:id/replay', replayDelivery);
+app.post('/api/deliveries/:id/replay', requireApiKey, replayDelivery);
 
 // Circuit Breaker APIs
 app.get('/api/circuits', listCircuits);
-app.post('/api/circuits/:endpointId/reset', resetCircuit);
+app.post('/api/circuits/:endpointId/reset', requireApiKey, resetCircuit);
 
 async function bootstrap() {
   try {
-    // 1. Initialize Redis Streams Consumer Group
+    // 1. Initialize Redis Streams Consumer Group across all shards
     await streamQueue.initGroup();
 
     // 2. Start Worker Pool asynchronously
@@ -67,7 +69,12 @@ async function bootstrap() {
       });
     }
 
-    // 3. Start Express HTTP Server
+    // 3. Start Background Retry Scheduler
+    if (process.env.RUN_SCHEDULER !== 'false') {
+      retryScheduler.start();
+    }
+
+    // 4. Start Express HTTP Server
     app.listen(config.port, () => {
       console.log(`[EventRelay] Server running on port ${config.port}`);
       console.log(`[EventRelay] Prometheus metrics live at http://localhost:${config.port}/metrics`);

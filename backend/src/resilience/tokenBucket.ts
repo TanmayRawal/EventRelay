@@ -1,6 +1,17 @@
 import { redis } from '../redis/client';
+import { metrics } from '../metrics/prometheus';
 
 export class TokenBucketRateLimiter {
+  private failClosed: boolean;
+
+  /**
+   * @param failClosed If true, Redis errors reject traffic (429/delay).
+   *                   If false (default), degrades gracefully to allow traffic (CAP Availability preference).
+   */
+  constructor(failClosed: boolean = process.env.RATE_LIMITER_FAIL_CLOSED === 'true') {
+    this.failClosed = failClosed;
+  }
+
   /**
    * Evaluates token consumption using atomic Redis operations.
    * Returns true if request is permitted under quota, false if rate limited.
@@ -52,8 +63,12 @@ export class TokenBucketRateLimiter {
       );
       return result === 1;
     } catch (err) {
-      console.warn('[RateLimiter] Redis rate limiter fallback to allow:', err);
-      return true;
+      metrics.incRateLimiterError();
+      console.warn(`[RateLimiter] Redis evaluation error (failClosed=${this.failClosed}):`, err);
+      // Architectural trade-off:
+      // When failClosed is false (default), we prefer system availability over quota consistency.
+      // When failClosed is true, we block execution to enforce strict third-party partner SLAs.
+      return !this.failClosed;
     }
   }
 }

@@ -45,7 +45,9 @@ export async function createEndpoint(req: Request, res: Response) {
 export async function listEndpoints(req: Request, res: Response) {
   try {
     const result = await query(`
-      SELECT e.*, cb.state as circuit_state, cb.failure_count as circuit_failures
+      SELECT e.id, e.name, e.url, e.rate_limit_rps, e.max_retries, e.timeout_ms, e.is_active, e.created_at,
+             CONCAT(SUBSTRING(e.secret_key FROM 1 FOR 10), '****************') as secret_preview,
+             cb.state as circuit_state, cb.failure_count as circuit_failures
       FROM endpoints e
       LEFT JOIN circuit_breakers cb ON e.id = cb.endpoint_id
       ORDER BY e.created_at DESC

@@ -17,17 +17,19 @@ CREATE TABLE IF NOT EXISTS endpoints (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Ingested Events (Idempotency Key Guard)
+-- Ingested Events (Idempotency Key Guard & FIFO Sharding Key)
 CREATE TABLE IF NOT EXISTS events (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     idempotency_key VARCHAR(128) UNIQUE NOT NULL,
     event_type VARCHAR(128) NOT NULL,
     payload JSONB NOT NULL,
+    ordering_key VARCHAR(255),
     status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_idempotency ON events(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_events_ordering_key ON events(ordering_key);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 
 -- Delivery Attempts & Audit Log

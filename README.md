@@ -153,7 +153,7 @@ The script configures Docker, sets up a 2GB swap partition for memory stability,
 | :--- | :--- |
 | **Why Redis Streams instead of Kafka or RabbitMQ?** | Redis Streams provides sub-millisecond in-memory throughput, built-in consumer groups (`XREADGROUP`), and message acknowledgment (`XACK`) without the operational overhead of ZooKeeper/KRaft. For a webhook delivery engine processing hundreds of thousands of events per day, it is fast and resource-efficient. |
 | **How is state consistency maintained during ingestion?** | PostgreSQL transactions wrap both the event write and the initial delivery row insertions. Redis Streams receives the dispatch notification only after the database transaction commits, ensuring no phantom deliveries exist. |
-| **Why use Full Jitter instead of fixed backoff?** | Fixed exponential backoff causes retrying workers to synchronize their requests at exact intervals ($2\text{s}, 4\text{s}, 8\text{s}$), recreating spikes on recovering endpoints. Full jitter spreads attempts evenly across time intervals. |
+| **Why use Full Jitter instead of fixed backoff?** | Fixed exponential backoff causes retrying workers to synchronize their requests at exact intervals (2s, 4s, 8s), recreating spikes on recovering endpoints. Full jitter spreads attempts evenly across time intervals. |
 
 ---
 

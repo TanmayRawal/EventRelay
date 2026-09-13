@@ -23,8 +23,8 @@ export class DeliveryWorker {
     while (this.isRunning) {
       try {
         const messages = await streamQueue.readMessages(this.workerId, 5, 2000);
-        for (const { messageId, job } of messages) {
-          await this.processJob(messageId, job);
+        for (const { messageId, streamName, job } of messages) {
+          await this.processJob(messageId, streamName, job);
         }
       } catch (err: any) {
         console.error(`[DeliveryWorker] Loop error:`, err.message);
@@ -38,7 +38,7 @@ export class DeliveryWorker {
     console.log(`[DeliveryWorker] Stopping worker '${this.workerId}'...`);
   }
 
-  async processJob(messageId: string, job: DeliveryJob): Promise<void> {
+  async processJob(messageId: string, streamName: string, job: DeliveryJob): Promise<void> {
     const { deliveryId, eventId, endpointId, attemptNumber } = job;
 
     // 1. Fetch Event & Endpoint details
@@ -47,7 +47,7 @@ export class DeliveryWorker {
 
     if (eventRes.rows.length === 0 || endpointRes.rows.length === 0) {
       console.warn(`[DeliveryWorker] Missing event (${eventId}) or endpoint (${endpointId}). Skipping.`);
-      await streamQueue.acknowledge(messageId);
+      await streamQueue.acknowledge(streamName, messageId);
       return;
     }
 
@@ -64,9 +64,9 @@ export class DeliveryWorker {
     if (!allowed) {
       console.warn(`[DeliveryWorker] Rate limit exceeded for endpoint ${endpoint.name}. Delaying...`);
       await new Promise((res) => setTimeout(res, 500));
-      // Re-publish to stream for later processing
-      await streamQueue.publish(job);
-      await streamQueue.acknowledge(messageId);
+      // Re-publish to stream shard for later processing
+      await streamQueue.publish(job, event.ordering_key);
+      await streamQueue.acknowledge(streamName, messageId);
       return;
     }
 
@@ -82,7 +82,7 @@ export class DeliveryWorker {
         null,
         'Circuit breaker is OPEN. Target host in cool-down.'
       );
-      await streamQueue.acknowledge(messageId);
+      await streamQueue.acknowledge(streamName, messageId);
       return;
     }
 
@@ -144,7 +144,7 @@ export class DeliveryWorker {
         durationMs
       );
     } finally {
-      await streamQueue.acknowledge(messageId);
+      await streamQueue.acknowledge(streamName, messageId);
     }
   }
 

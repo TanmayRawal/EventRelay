@@ -8,6 +8,7 @@ class MetricsRegistry {
   private eventsIngested: Map<string, number> = new Map();
   private deliveriesTotal: Map<string, number> = new Map();
   private dlqTotal: number = 0;
+  private rateLimiterErrors: number = 0;
   private latencyBuckets: number[] = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
   private latencyHistogram: Map<number, number> = new Map();
   private latencySum: number = 0;
@@ -31,6 +32,10 @@ class MetricsRegistry {
 
   incDlq() {
     this.dlqTotal++;
+  }
+
+  incRateLimiterError() {
+    this.rateLimiterErrors++;
   }
 
   observeLatency(durationSeconds: number) {
@@ -79,6 +84,11 @@ class MetricsRegistry {
     lines.push('\n# HELP eventrelay_dlq_total Total deliveries routed to Dead-Letter Queue');
     lines.push('# TYPE eventrelay_dlq_total counter');
     lines.push(`eventrelay_dlq_total ${this.dlqTotal}`);
+
+    // 3b. Rate Limiter Fallback Errors
+    lines.push('\n# HELP eventrelay_ratelimiter_errors_total Total Redis rate limiter evaluation exceptions');
+    lines.push('# TYPE eventrelay_ratelimiter_errors_total counter');
+    lines.push(`eventrelay_ratelimiter_errors_total ${this.rateLimiterErrors}`);
 
     // 4. Latency Histogram
     lines.push('\n# HELP eventrelay_delivery_duration_seconds Webhook execution latency');
