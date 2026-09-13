@@ -46,7 +46,9 @@ jest.mock('../src/db/client', () => ({
         lastFailureAt: null
       };
 
-      if (sql.includes("state = 'HALF_OPEN'")) {
+      if (sql.includes("state = 'HALF_OPEN_PROBING'")) {
+        record.state = 'HALF_OPEN_PROBING';
+      } else if (sql.includes("state = 'HALF_OPEN'")) {
         record.state = 'HALF_OPEN';
       } else if (sql.includes("state = 'CLOSED'")) {
         record.state = 'CLOSED';
@@ -54,8 +56,11 @@ jest.mock('../src/db/client', () => ({
         record.openedAt = null;
       } else if (sql.includes("state = 'OPEN'")) {
         record.state = 'OPEN';
-        record.failureCount = params[1];
         record.openedAt = new Date();
+      }
+
+      if (sql.includes('failure_count = failure_count + 1')) {
+        record.failureCount += 1;
       } else if (sql.includes('failure_count = $2')) {
         record.failureCount = params[1];
       }
@@ -120,7 +125,7 @@ describe('CircuitBreakerRegistry (Stateful Resilience Engine)', () => {
     expect(allowed).toBe(false);
   });
 
-  it('should transition to HALF_OPEN after cooldown expires', async () => {
+  it('should transition to HALF_OPEN_PROBING after cooldown expires and permit only one trial probe', async () => {
     // Trip circuit to OPEN
     for (let i = 0; i < 5; i++) {
       await cb.recordFailure(endpointId);
@@ -131,12 +136,16 @@ describe('CircuitBreakerRegistry (Stateful Resilience Engine)', () => {
     record.openedAt = new Date(Date.now() - 35000);
     store.set(endpointId, record);
 
-    // Trial execution probe should now be permitted
+    // First worker claims single trial probe
     const allowed = await cb.canExecute(endpointId);
     expect(allowed).toBe(true);
 
     const updated = await cb.getCircuit(endpointId);
-    expect(updated.state).toBe('HALF_OPEN');
+    expect(updated.state).toBe('HALF_OPEN_PROBING');
+
+    // Second worker attempting concurrent probe must be fast-failed
+    const concurrentAllowed = await cb.canExecute(endpointId);
+    expect(concurrentAllowed).toBe(false);
   });
 
   it('should close circuit and reset failures when trial request in HALF_OPEN succeeds', async () => {

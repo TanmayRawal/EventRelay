@@ -14,11 +14,19 @@ function getDatabaseUrl(): string {
   return `postgres://${auth}${host}:${port}/${db}`;
 }
 
+const rawApiKey = process.env.EVENTRELAY_API_KEY ? process.env.EVENTRELAY_API_KEY.trim() : null;
+
+// Fail-closed security: In production, require an explicit API key to start
+if (process.env.NODE_ENV === 'production' && !rawApiKey) {
+  console.error('[EventRelay:FATAL] Missing required EVENTRELAY_API_KEY in production mode. Refusing to start in open unauthenticated mode.');
+  process.exit(1);
+}
+
 export const config = {
   port: parseInt(process.env.PORT || '4000', 10),
   databaseUrl: getDatabaseUrl(),
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-  apiKey: process.env.EVENTRELAY_API_KEY ? process.env.EVENTRELAY_API_KEY.trim() : null,
+  apiKey: rawApiKey,
   corsOrigin: process.env.CORS_ORIGIN || '*',
   ingestionRateLimitRps: parseInt(process.env.INGESTION_RATE_LIMIT_RPS || '200', 10),
   rateLimiterFailClosed: process.env.RATE_LIMITER_FAIL_CLOSED === 'true',

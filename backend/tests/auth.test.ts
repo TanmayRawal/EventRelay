@@ -101,7 +101,7 @@ describe('requireApiKey Middleware (Authentication Boundary)', () => {
     expect(nextFunction).not.toHaveBeenCalled();
   });
 
-  it('should allow requests through if config.apiKey is not set (open bypass mode)', () => {
+  it('should allow requests through in non-production if config.apiKey is not set (dev bypass mode)', () => {
     config.apiKey = null;
     (mockRequest.header as jest.Mock).mockReturnValue(undefined);
 
@@ -109,5 +109,20 @@ describe('requireApiKey Middleware (Authentication Boundary)', () => {
 
     expect(nextFunction).toHaveBeenCalled();
     expect(mockResponse.status).not.toHaveBeenCalled();
+  });
+
+  it('should reject requests with 500 in production if config.apiKey is not set (fail-closed)', () => {
+    const prevEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    config.apiKey = null;
+
+    requireApiKey(mockRequest as Request, mockResponse as Response, nextFunction);
+
+    expect(mockResponse.status).toHaveBeenCalledWith(500);
+    expect(mockResponse.json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.stringContaining('Server misconfiguration') })
+    );
+    expect(nextFunction).not.toHaveBeenCalled();
+    process.env.NODE_ENV = prevEnv;
   });
 });

@@ -43,8 +43,8 @@ export default function App() {
   const fetchData = async () => {
     try {
       const [resEp, resDel] = await Promise.all([
-        fetch('/api/endpoints').then(r => r.json()),
-        fetch('/api/deliveries').then(r => r.json())
+        fetch('/api/endpoints', { headers: getAuthHeaders() }).then(r => r.json()),
+        fetch('/api/deliveries', { headers: getAuthHeaders() }).then(r => r.json())
       ]);
       if (Array.isArray(resEp)) setEndpoints(resEp);
       if (Array.isArray(resDel)) setDeliveries(resDel);
@@ -57,7 +57,7 @@ export default function App() {
     fetchData();
     const interval = setInterval(fetchData, 4000);
     return () => clearInterval(interval);
-  }, []);
+  }, [apiKey]);
 
   const handleReplay = async (deliveryId: string) => {
     setLoading(true);

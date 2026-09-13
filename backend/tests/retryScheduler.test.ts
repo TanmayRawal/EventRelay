@@ -1,15 +1,16 @@
 import { RetryScheduler } from '../src/worker/retryScheduler';
-import { query } from '../src/db/client';
-import { streamQueue } from '../src/redis/streamQueue';
+import { withTransaction, query } from '../src/db/client';
+import { outboxPublisher } from '../src/worker/outboxPublisher';
 import { metrics } from '../src/metrics/prometheus';
 
 jest.mock('../src/db/client', () => ({
+  withTransaction: jest.fn(),
   query: jest.fn()
 }));
 
-jest.mock('../src/redis/streamQueue', () => ({
-  streamQueue: {
-    publish: jest.fn().mockResolvedValue('msg-id-123')
+jest.mock('../src/worker/outboxPublisher', () => ({
+  outboxPublisher: {
+    poke: jest.fn()
   }
 }));
 
@@ -32,15 +33,20 @@ describe('RetryScheduler (Background Retry Engine)', () => {
   });
 
   it('should return 0 when no deliveries are due for retry', async () => {
-    (query as jest.Mock).mockResolvedValueOnce({ rows: [] });
+    (withTransaction as jest.Mock).mockImplementation(async (cb) => {
+      const mockClient = {
+        query: jest.fn().mockResolvedValueOnce({ rows: [] })
+      };
+      return cb(mockClient);
+    });
 
     const processed = await scheduler.pollAndReenqueue();
 
     expect(processed).toBe(0);
-    expect(streamQueue.publish).not.toHaveBeenCalled();
+    expect(outboxPublisher.poke).not.toHaveBeenCalled();
   });
 
-  it('should re-enqueue due delivery preserving orderingKey on shard', async () => {
+  it('should re-enqueue due delivery via Transactional Outbox with FOR UPDATE SKIP LOCKED', async () => {
     const mockDueDelivery = {
       id: 'del-uuid-001',
       event_id: 'evt-uuid-001',
@@ -50,31 +56,37 @@ describe('RetryScheduler (Background Retry Engine)', () => {
       max_retries: 3
     };
 
-    // First query returns the due delivery
-    (query as jest.Mock).mockResolvedValueOnce({ rows: [mockDueDelivery] });
-    // Second query is the UPDATE query
-    (query as jest.Mock).mockResolvedValueOnce({ rowCount: 1 });
+    let clientQueries: { sql: string; params: any[] }[] = [];
+
+    (withTransaction as jest.Mock).mockImplementation(async (cb) => {
+      const mockClient = {
+        query: jest.fn().mockImplementation((sql, params) => {
+          clientQueries.push({ sql, params });
+          if (sql.includes('SELECT')) return Promise.resolve({ rows: [mockDueDelivery] });
+          return Promise.resolve({ rowCount: 1, rows: [] });
+        })
+      };
+      return cb(mockClient);
+    });
 
     const processed = await scheduler.pollAndReenqueue();
 
     expect(processed).toBe(1);
 
-    // Verify DB update incremented attempt_number
-    expect(query).toHaveBeenCalledWith(
-      expect.stringContaining('UPDATE deliveries\n             SET attempt_number = $1'),
-      [2, 'del-uuid-001']
-    );
+    // Verify FOR UPDATE SKIP LOCKED query was executed
+    expect(clientQueries[0].sql).toContain('FOR UPDATE SKIP LOCKED');
 
-    // Verify publish called with correct shard ordering key
-    expect(streamQueue.publish).toHaveBeenCalledWith(
-      {
-        deliveryId: 'del-uuid-001',
-        eventId: 'evt-uuid-001',
-        endpointId: 'ep-uuid-001',
-        attemptNumber: 2
-      },
-      'tenant_customer_42'
-    );
+    // Verify DB update incremented attempt_number
+    const updateQuery = clientQueries.find(q => q.sql.includes('UPDATE deliveries'));
+    expect(updateQuery).toBeDefined();
+    expect(updateQuery?.params).toEqual([2, 'del-uuid-001']);
+
+    // Verify write to outbox table inside the transaction
+    const outboxQuery = clientQueries.find(q => q.sql.includes('INSERT INTO outbox'));
+    expect(outboxQuery).toBeDefined();
+    expect(outboxQuery?.params).toEqual(['del-uuid-001', 'evt-uuid-001', 'ep-uuid-001', 2, 'tenant_customer_42']);
+
+    expect(outboxPublisher.poke).toHaveBeenCalled();
   });
 
   it('should transition delivery to DEAD_LETTER and increment DLQ metric when max retries exceeded', async () => {
@@ -87,29 +99,37 @@ describe('RetryScheduler (Background Retry Engine)', () => {
       max_retries: 3
     };
 
-    // Next attempt (4) > max_retries (3)
-    (query as jest.Mock).mockResolvedValueOnce({ rows: [mockExhaustedDelivery] });
-    (query as jest.Mock).mockResolvedValueOnce({ rowCount: 1 });
+    let clientQueries: { sql: string; params: any[] }[] = [];
+
+    (withTransaction as jest.Mock).mockImplementation(async (cb) => {
+      const mockClient = {
+        query: jest.fn().mockImplementation((sql, params) => {
+          clientQueries.push({ sql, params });
+          if (sql.includes('SELECT')) return Promise.resolve({ rows: [mockExhaustedDelivery] });
+          return Promise.resolve({ rowCount: 1, rows: [] });
+        })
+      };
+      return cb(mockClient);
+    });
 
     const processed = await scheduler.pollAndReenqueue();
 
     expect(processed).toBe(1);
 
     // Verify DB updated to DEAD_LETTER
-    expect(query).toHaveBeenCalledWith(
-      expect.stringContaining("SET status = 'DEAD_LETTER'"),
-      ['del-uuid-dead-002']
-    );
+    const dlqUpdate = clientQueries.find(q => q.sql.includes("SET status = 'DEAD_LETTER'"));
+    expect(dlqUpdate).toBeDefined();
+    expect(dlqUpdate?.params).toEqual(['del-uuid-dead-002']);
 
-    // Verify DLQ metric incremented
     expect(metrics.incDlq).toHaveBeenCalled();
 
-    // Must NOT publish to stream queue
-    expect(streamQueue.publish).not.toHaveBeenCalled();
+    // Must NOT write to outbox for dead-lettered job
+    const outboxQuery = clientQueries.find(q => q.sql.includes('INSERT INTO outbox'));
+    expect(outboxQuery).toBeUndefined();
   });
 
   it('should gracefully handle database query failure without throwing', async () => {
-    (query as jest.Mock).mockRejectedValueOnce(new Error('PostgreSQL connection drop'));
+    (withTransaction as jest.Mock).mockRejectedValueOnce(new Error('PostgreSQL connection drop'));
 
     const processed = await scheduler.pollAndReenqueue();
 

@@ -46,20 +46,22 @@ app.get('/metrics', (req, res) => {
   res.send(metrics.exportPrometheus());
 });
 
+import { outboxPublisher } from './worker/outboxPublisher';
+
 // Event APIs
 app.post('/api/events', requireApiKey, inboundRateLimiter, ingestEvent);
-app.get('/api/events', listEvents);
+app.get('/api/events', requireApiKey, listEvents);
 
 // Endpoint APIs
 app.post('/api/endpoints', requireApiKey, createEndpoint);
-app.get('/api/endpoints', listEndpoints);
+app.get('/api/endpoints', requireApiKey, listEndpoints);
 
 // Delivery & DLQ Replay APIs
-app.get('/api/deliveries', listDeliveries);
+app.get('/api/deliveries', requireApiKey, listDeliveries);
 app.post('/api/deliveries/:id/replay', requireApiKey, replayDelivery);
 
 // Circuit Breaker APIs
-app.get('/api/circuits', listCircuits);
+app.get('/api/circuits', requireApiKey, listCircuits);
 app.post('/api/circuits/:endpointId/reset', requireApiKey, resetCircuit);
 
 async function bootstrap() {
@@ -67,23 +69,43 @@ async function bootstrap() {
     // 1. Initialize Redis Streams Consumer Group across all shards
     await streamQueue.initGroup();
 
-    // 2. Start Worker Pool asynchronously
+    // 2. Start Transactional Outbox Publisher
+    if (process.env.RUN_OUTBOX !== 'false') {
+      outboxPublisher.start();
+    }
+
+    // 3. Start Worker Pool asynchronously with Shard Partition Leases
     if (process.env.RUN_WORKER !== 'false') {
       deliveryWorker.start().catch((err) => {
         console.error('[Worker] Fatal error:', err);
       });
     }
 
-    // 3. Start Background Retry Scheduler
+    // 4. Start Background Retry Scheduler
     if (process.env.RUN_SCHEDULER !== 'false') {
       retryScheduler.start();
     }
 
-    // 4. Start Express HTTP Server
-    app.listen(config.port, () => {
+    // 5. Start Express HTTP Server
+    const server = app.listen(config.port, () => {
       console.log(`[EventRelay] Server running on port ${config.port}`);
       console.log(`[EventRelay] Prometheus metrics live at http://localhost:${config.port}/metrics`);
     });
+
+    const shutdown = async () => {
+      console.log('[EventRelay] Shutting down gracefully...');
+      outboxPublisher.stop();
+      retryScheduler.stop();
+      await deliveryWorker.stop();
+      server.close(() => {
+        console.log('[EventRelay] Closed HTTP server.');
+        process.exit(0);
+      });
+    };
+
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+
   } catch (err) {
     console.error('[EventRelay] Startup failed:', err);
     process.exit(1);

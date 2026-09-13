@@ -1,7 +1,7 @@
 import { query } from '../db/client';
 import { metrics } from '../metrics/prometheus';
 
-export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN' | 'HALF_OPEN_PROBING';
 
 export interface CircuitRecord {
   endpointId: string;
@@ -15,8 +15,6 @@ export interface CircuitRecord {
 }
 
 export class CircuitBreakerRegistry {
-  private localCache: Map<string, { state: CircuitState; nextAttemptAt: number }> = new Map();
-
   async getCircuit(endpointId: string): Promise<CircuitRecord> {
     const res = await query(
       `SELECT endpoint_id as "endpointId", state, failure_count as "failureCount",
@@ -32,18 +30,25 @@ export class CircuitBreakerRegistry {
       const initRes = await query(
         `INSERT INTO circuit_breakers (endpoint_id, state, failure_count, success_count)
          VALUES ($1, 'CLOSED', 0, 0)
+         ON CONFLICT (endpoint_id) DO NOTHING
          RETURNING endpoint_id as "endpointId", state, failure_count as "failureCount",
                    success_count as "successCount", threshold_failures as "thresholdFailures",
                    cool_down_seconds as "coolDownSeconds", opened_at as "openedAt",
                    last_failure_at as "lastFailureAt"`,
         [endpointId]
       );
-      return initRes.rows[0];
+      if (initRes.rows.length > 0) return initRes.rows[0];
+      return (await this.getCircuit(endpointId));
     }
 
     return res.rows[0];
   }
 
+  /**
+   * Evaluates if execution is permitted.
+   * Single-probe safe: In HALF_OPEN, only one worker can atomically claim the trial probe lease.
+   * Concurrent workers are fast-failed without network I/O until the probe completes.
+   */
   async canExecute(endpointId: string): Promise<boolean> {
     const circuit = await this.getCircuit(endpointId);
 
@@ -57,29 +62,45 @@ export class CircuitBreakerRegistry {
       const coolDownMs = circuit.coolDownSeconds * 1000;
 
       if (now - openedAt > coolDownMs) {
-        // Transition to HALF_OPEN
-        await query(
+        // Cooldown elapsed: attempt to atomically claim the single trial probe
+        const claimRes = await query(
           `UPDATE circuit_breakers
-           SET state = 'HALF_OPEN', updated_at = CURRENT_TIMESTAMP
-           WHERE endpoint_id = $1`,
+           SET state = 'HALF_OPEN_PROBING', updated_at = CURRENT_TIMESTAMP
+           WHERE endpoint_id = $1 AND state = 'OPEN'
+           RETURNING state`,
           [endpointId]
         );
-        metrics.setCircuitState(endpointId, 'HALF_OPEN');
-        return true; // Trial request permitted
+
+        if (claimRes.rows.length > 0) {
+          metrics.setCircuitState(endpointId, 'HALF_OPEN');
+          return true; // Single trial probe granted
+        }
       }
 
-      return false; // Still within cool-down
+      return false; // Still within cool-down or another worker claimed the probe
     }
 
-    // HALF_OPEN: allow trial request
-    return true;
+    if (circuit.state === 'HALF_OPEN') {
+      // Atomically claim the single probe lease
+      const claimRes = await query(
+        `UPDATE circuit_breakers
+         SET state = 'HALF_OPEN_PROBING', updated_at = CURRENT_TIMESTAMP
+         WHERE endpoint_id = $1 AND state = 'HALF_OPEN'
+         RETURNING state`,
+        [endpointId]
+      );
+      return claimRes.rows.length > 0;
+    }
+
+    // HALF_OPEN_PROBING: a trial probe is already inflight. Fast-fail other concurrent dispatches.
+    return false;
   }
 
   async recordSuccess(endpointId: string): Promise<void> {
     const circuit = await this.getCircuit(endpointId);
 
-    if (circuit.state === 'HALF_OPEN') {
-      // Trial succeeded, close circuit
+    if (circuit.state === 'HALF_OPEN' || circuit.state === 'HALF_OPEN_PROBING') {
+      // Trial probe succeeded, reset circuit back to CLOSED
       await query(
         `UPDATE circuit_breakers
          SET state = 'CLOSED', failure_count = 0, success_count = 0, opened_at = NULL, updated_at = CURRENT_TIMESTAMP
@@ -88,7 +109,6 @@ export class CircuitBreakerRegistry {
       );
       metrics.setCircuitState(endpointId, 'CLOSED');
     } else if (circuit.state === 'CLOSED' && circuit.failureCount > 0) {
-      // Reset failure count on success
       await query(
         `UPDATE circuit_breakers
          SET failure_count = 0, updated_at = CURRENT_TIMESTAMP
@@ -99,30 +119,34 @@ export class CircuitBreakerRegistry {
   }
 
   async recordFailure(endpointId: string): Promise<CircuitState> {
-    const circuit = await this.getCircuit(endpointId);
-    const newFailures = circuit.failureCount + 1;
+    // Atomic failure count increment
+    const updateRes = await query(
+      `UPDATE circuit_breakers
+       SET failure_count = failure_count + 1,
+           last_failure_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE endpoint_id = $1
+       RETURNING failure_count as "failureCount", threshold_failures as "thresholdFailures", state`,
+      [endpointId]
+    );
 
-    if (circuit.state === 'HALF_OPEN' || newFailures >= circuit.thresholdFailures) {
-      // Trip the circuit to OPEN
+    if (updateRes.rows.length === 0) return 'OPEN';
+
+    const row = updateRes.rows[0];
+
+    if (row.state === 'HALF_OPEN_PROBING' || row.state === 'HALF_OPEN' || row.failureCount >= row.thresholdFailures) {
+      // Trip circuit back to OPEN
       await query(
         `UPDATE circuit_breakers
-         SET state = 'OPEN', failure_count = $2, opened_at = CURRENT_TIMESTAMP,
-             last_failure_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         SET state = 'OPEN', opened_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE endpoint_id = $1`,
-        [endpointId, newFailures]
+        [endpointId]
       );
       metrics.setCircuitState(endpointId, 'OPEN');
       return 'OPEN';
-    } else {
-      // Increment failure count
-      await query(
-        `UPDATE circuit_breakers
-         SET failure_count = $2, last_failure_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-         WHERE endpoint_id = $1`,
-        [endpointId, newFailures]
-      );
-      return circuit.state;
     }
+
+    return row.state;
   }
 
   async resetCircuit(endpointId: string): Promise<void> {

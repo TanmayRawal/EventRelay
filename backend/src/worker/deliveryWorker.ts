@@ -7,35 +7,90 @@ import { rateLimiter } from '../resilience/tokenBucket';
 import { hmacSigner } from '../crypto/hmacSigner';
 import { config } from '../config';
 import { metrics } from '../metrics/prometheus';
+import { ShardLeaseCoordinator } from './shardLeaseCoordinator';
+import { partitioner } from '../sharding/partitioner';
+import { syncEventStatus } from '../db/eventStatus';
 
 export class DeliveryWorker {
   private isRunning: boolean = false;
   private workerId: string;
+  private leaseCoordinator: ShardLeaseCoordinator;
 
   constructor(workerId: string = config.consumerName) {
     this.workerId = workerId;
+    this.leaseCoordinator = new ShardLeaseCoordinator(workerId);
+  }
+
+  getCoordinator(): ShardLeaseCoordinator {
+    return this.leaseCoordinator;
   }
 
   async start(): Promise<void> {
     this.isRunning = true;
-    console.log(`[DeliveryWorker] Started worker '${this.workerId}'. Listening to Redis stream...`);
+    console.log(`[DeliveryWorker] Started worker '${this.workerId}'. Initializing shard partition leases...`);
+
+    await this.leaseCoordinator.start();
 
     while (this.isRunning) {
       try {
-        const messages = await streamQueue.readMessages(this.workerId, 5, 2000);
-        for (const { messageId, streamName, job } of messages) {
+        const ownedShards = this.leaseCoordinator.getOwnedShards();
+
+        if (ownedShards.length === 0) {
+          // No shard leases acquired yet, wait briefly for coordinator heartbeat
+          await new Promise((res) => setTimeout(res, 300));
+          continue;
+        }
+
+        let hadMessages = false;
+        const shardStreams = partitioner.getAllShardStreams(config.streamName);
+
+        for (const shardId of ownedShards) {
+          if (!this.isRunning) break;
+
+          const targetStream = shardStreams[shardId] || config.streamName;
+
+          // 1. Recover any unacknowledged messages from dead workers using XAUTOCLAIM
+          const claimedMessages = await streamQueue.autoClaimPending(targetStream, this.workerId, 30000, 5);
+          for (const { messageId, streamName, job } of claimedMessages) {
+            hadMessages = true;
+            await this.processJob(messageId, streamName, job);
+          }
+
+          // 2. Read new messages exclusively for this owned shard (preserving in-order FIFO execution)
+          const messages = await streamQueue.readShardMessages(targetStream, this.workerId, 5, 20);
+          for (const { messageId, streamName, job } of messages) {
+            hadMessages = true;
+            await this.processJob(messageId, streamName, job);
+          }
+        }
+
+        // 3. Also read unpartitioned deliveries from baseStream
+        const claimedBase = await streamQueue.autoClaimPending(config.streamName, this.workerId, 30000, 5);
+        for (const { messageId, streamName, job } of claimedBase) {
+          hadMessages = true;
           await this.processJob(messageId, streamName, job);
+        }
+
+        const baseMessages = await streamQueue.readShardMessages(config.streamName, this.workerId, 10, 50);
+        for (const { messageId, streamName, job } of baseMessages) {
+          hadMessages = true;
+          await this.processJob(messageId, streamName, job);
+        }
+
+        if (!hadMessages) {
+          await new Promise((res) => setTimeout(res, 50));
         }
       } catch (err: any) {
         console.error(`[DeliveryWorker] Loop error:`, err.message);
-        await new Promise((res) => setTimeout(res, 1000));
+        await new Promise((res) => setTimeout(res, 500));
       }
     }
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.isRunning = false;
     console.log(`[DeliveryWorker] Stopping worker '${this.workerId}'...`);
+    await this.leaseCoordinator.releaseAll();
   }
 
   async processJob(messageId: string, streamName: string, job: DeliveryJob): Promise<void> {
@@ -54,20 +109,35 @@ export class DeliveryWorker {
     const event = eventRes.rows[0];
     const endpoint = endpointRes.rows[0];
 
-    // 2. Check Rate Limiter
-    const allowed = await rateLimiter.consume(
+    // 2. Check Rate Limiter with in-place wait to preserve partition FIFO sequence
+    let allowed = await rateLimiter.consume(
       `endpoint:${endpoint.id}`,
       endpoint.rate_limit_rps,
       endpoint.rate_limit_rps
     );
 
     if (!allowed) {
-      console.warn(`[DeliveryWorker] Rate limit exceeded for endpoint ${endpoint.name}. Delaying...`);
+      console.warn(`[DeliveryWorker] Rate limit reached for ${endpoint.name}. In-place backoff (500ms)...`);
       await new Promise((res) => setTimeout(res, 500));
-      // Re-publish to stream shard for later processing
-      await streamQueue.publish(job, event.ordering_key);
-      await streamQueue.acknowledge(streamName, messageId);
-      return;
+      allowed = await rateLimiter.consume(
+        `endpoint:${endpoint.id}`,
+        endpoint.rate_limit_rps,
+        endpoint.rate_limit_rps
+      );
+
+      if (!allowed) {
+        // Schedule next retry rather than reordering stream at tail
+        await this.handleFailure(
+          deliveryId,
+          eventId,
+          endpoint,
+          attemptNumber,
+          429,
+          'Endpoint rate limit throttled. Scheduled for backoff retry.'
+        );
+        await streamQueue.acknowledge(streamName, messageId);
+        return;
+      }
     }
 
     // 3. Check Circuit Breaker
@@ -111,12 +181,14 @@ export class DeliveryWorker {
       await query(
         `UPDATE deliveries
          SET http_status = $1, response_body = $2, duration_ms = $3,
-             status = 'SUCCESS', error_message = NULL
+             status = 'SUCCESS', error_message = NULL, next_retry_at = NULL
          WHERE id = $4`,
         [response.status, JSON.stringify(response.data).slice(0, 2048), durationMs, deliveryId]
       );
 
-      await query(`UPDATE events SET status = 'COMPLETED' WHERE id = $1`, [eventId]);
+      // Synchronize overall event status across all fan-out child deliveries
+      await syncEventStatus(eventId);
+
       await circuitBreaker.recordSuccess(endpoint.id);
       metrics.incDelivery(endpoint.name, 'SUCCESS');
       metrics.observeLatency(durationMs / 1000.0);
@@ -172,7 +244,7 @@ export class DeliveryWorker {
         [httpStatus, errorMsg, durationMs, nextRetryAt, attemptNumber, deliveryId]
       );
 
-      // In production, a scheduler/cron re-enqueues retrying deliveries when next_retry_at is reached
+      await syncEventStatus(eventId);
       console.log(`[DeliveryWorker] Scheduled attempt #${attemptNumber + 1} in ${delaySeconds}s for delivery ${deliveryId}`);
     } else {
       // Exceeded max retries: Dead-Letter Queue
@@ -184,7 +256,7 @@ export class DeliveryWorker {
         [httpStatus, errorMsg, durationMs, deliveryId]
       );
 
-      await query(`UPDATE events SET status = 'FAILED' WHERE id = $1`, [eventId]);
+      await syncEventStatus(eventId);
       metrics.incDlq();
       console.warn(`[DeliveryWorker] Delivery ${deliveryId} transitioned to DEAD_LETTER (Max attempts exceeded)`);
     }

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
-import { query } from '../db/client';
-import { streamQueue } from '../redis/streamQueue';
+import { query, withTransaction } from '../db/client';
+import { outboxPublisher } from '../worker/outboxPublisher';
+import { syncEventStatus } from '../db/eventStatus';
 
 export async function listDeliveries(req: Request, res: Response) {
   try {
@@ -47,30 +48,34 @@ export async function replayDelivery(req: Request, res: Response) {
 
     const delivery = resDelivery.rows[0];
 
-    // Reset status to RETRYING and reset attempt number
-    const updatedRes = await query(
-      `UPDATE deliveries
-       SET status = 'RETRYING', error_message = 'Manual replay triggered via admin console',
-           attempt_number = 1, next_retry_at = CURRENT_TIMESTAMP
-       WHERE id = $1
-       RETURNING *`,
-      [id]
-    );
+    // Atomically reset status and write to outbox
+    const updatedDelivery = await withTransaction(async (client) => {
+      const updatedRes = await client.query(
+        `UPDATE deliveries
+         SET status = 'RETRYING', error_message = 'Manual replay triggered via admin console',
+             attempt_number = 1, next_retry_at = NULL
+         WHERE id = $1
+         RETURNING *`,
+        [id]
+      );
 
-    // Re-queue to Redis Streams preserving entity shard ordering
-    await streamQueue.publish({
-      deliveryId: delivery.id,
-      eventId: delivery.event_id,
-      endpointId: delivery.endpoint_id,
-      attemptNumber: 1
-    }, delivery.ordering_key || undefined);
+      await client.query(
+        `INSERT INTO outbox (delivery_id, event_id, endpoint_id, attempt_number, ordering_key)
+         VALUES ($1, $2, $3, 1, $4)`,
+        [delivery.id, delivery.event_id, delivery.endpoint_id, delivery.ordering_key || null]
+      );
 
+      await syncEventStatus(delivery.event_id, client);
+      return updatedRes.rows[0];
+    });
+
+    outboxPublisher.poke();
     console.log(`[Admin] Manual replay initiated for delivery: ${id}`);
 
     return res.json({
       message: 'Delivery successfully queued for manual replay',
       deliveryId: id,
-      delivery: updatedRes.rows[0]
+      delivery: updatedDelivery
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });

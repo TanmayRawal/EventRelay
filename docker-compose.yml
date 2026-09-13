@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password_dev}
       POSTGRES_DB: ${POSTGRES_DB:-eventrelay_db}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/src/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
@@ -23,7 +23,7 @@ services:
     container_name: eventrelay-redis
     restart: always
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     volumes:
       - redis_data:/data
     command: ["redis-server", "--appendonly", "yes"]
@@ -46,6 +46,8 @@ services:
       EVENTRELAY_API_KEY: ${EVENTRELAY_API_KEY:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       INGESTION_RATE_LIMIT_RPS: ${INGESTION_RATE_LIMIT_RPS:-1000}
+      ALLOW_PRIVATE_ENDPOINTS: "true"
+      ALLOW_HTTP_ENDPOINTS: "true"
       NODE_ENV: production
     ports:
       - "4000:4000"

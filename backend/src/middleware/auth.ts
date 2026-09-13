@@ -8,9 +8,14 @@ import { config } from '../config';
  * crypto.timingSafeEqual to defend against side-channel timing attacks.
  */
 export function requireApiKey(req: Request, res: Response, next: NextFunction) {
-  // If no API key is enforced in environment (e.g. local open demo mode), allow request
+  // If no API key is configured
   if (!config.apiKey) {
-    return next();
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(500).json({
+        error: 'Server misconfiguration: EVENTRELAY_API_KEY is not configured in production.'
+      });
+    }
+    return next(); // Unauthenticated bypass permitted only in non-production environments
   }
 
   const authHeader = req.header('Authorization');

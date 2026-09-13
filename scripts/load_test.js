@@ -16,9 +16,9 @@ console.log(`  Target: ${TARGET_URL}`);
 console.log(`  Total Requests: ${TOTAL_REQUESTS} | Concurrency: ${CONCURRENCY}`);
 console.log('=================================================================\n');
 
-function postEvent(idempotencyKey, eventType, payload) {
+function postEvent(idempotencyKey, eventType, payload, orderingKey) {
   return new Promise((resolve) => {
-    const data = JSON.stringify({ eventType, payload });
+    const data = JSON.stringify({ eventType, payload, orderingKey });
     const startTime = Date.now();
 
     const apiKey = process.env.EVENTRELAY_API_KEY || 'er_secure_local_dev_key_8921';
@@ -70,7 +70,8 @@ async function runBenchmark() {
       const res = await postEvent(
         idempKey,
         'order.payment_completed',
-        { orderId: `ORD-${idx}`, amount: 199.99, account: `ACC-${idx % 20}` }
+        { orderId: `ORD-${idx}`, amount: 199.99, account: `ACC-${idx % 20}` },
+        `acc_tenant_${idx % 8}`
       );
 
       latencies.push(res.duration);

@@ -1,5 +1,5 @@
 -- EventRelay Database Schema
--- Production-grade relational schema with indexes, foreign keys, and status enums
+-- Relational schema with indexes, foreign keys, transactional outbox, and resilience states
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
     max_retries INTEGER NOT NULL DEFAULT 5,
     timeout_ms INTEGER NOT NULL DEFAULT 5000,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    subscribed_events TEXT[] NOT NULL DEFAULT '{}',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_type VARCHAR(128) NOT NULL,
     payload JSONB NOT NULL,
     ordering_key VARCHAR(255),
-    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+    status VARCHAR(32) NOT NULL DEFAULT 'PENDING', -- PENDING, PROCESSING, COMPLETED, FAILED, PARTIAL_SUCCESS
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     response_body TEXT,
     duration_ms INTEGER,
     error_message TEXT,
-    status VARCHAR(32) NOT NULL DEFAULT 'SUCCESS', -- SUCCESS, RETRYING, DEAD_LETTER
+    status VARCHAR(32) NOT NULL DEFAULT 'RETRYING', -- SUCCESS, RETRYING, DEAD_LETTER
     next_retry_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -51,10 +52,23 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_event_id ON deliveries(event_id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_endpoint_status ON deliveries(endpoint_id, status);
 CREATE INDEX IF NOT EXISTS idx_deliveries_retry ON deliveries(status, next_retry_at);
 
+-- Transactional Outbox for Durable Dispatch
+CREATE TABLE IF NOT EXISTS outbox (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    delivery_id UUID NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    event_id UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    endpoint_id UUID NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+    attempt_number INTEGER NOT NULL DEFAULT 1,
+    ordering_key VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_created_at ON outbox(created_at ASC);
+
 -- Circuit Breaker State per Endpoint
 CREATE TABLE IF NOT EXISTS circuit_breakers (
     endpoint_id UUID PRIMARY KEY REFERENCES endpoints(id) ON DELETE CASCADE,
-    state VARCHAR(32) NOT NULL DEFAULT 'CLOSED', -- CLOSED, OPEN, HALF_OPEN
+    state VARCHAR(32) NOT NULL DEFAULT 'CLOSED', -- CLOSED, OPEN, HALF_OPEN, HALF_OPEN_PROBING
     failure_count INTEGER NOT NULL DEFAULT 0,
     success_count INTEGER NOT NULL DEFAULT 0,
     threshold_failures INTEGER NOT NULL DEFAULT 5,
