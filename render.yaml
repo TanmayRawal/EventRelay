@@ -21,6 +21,8 @@ services:
           property: connectionString
       - key: NODE_ENV
         value: production
+      - key: EVENTRELAY_API_KEY
+        generateValue: true
 
   - type: redis
     name: eventrelay-redis

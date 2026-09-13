@@ -15,8 +15,9 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: eventrelay
-          POSTGRES_PASSWORD: eventrelay_secret
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD || 'ci_ephemeral_pg_pass' }}
           POSTGRES_DB: eventrelay_db
+          EVENTRELAY_API_KEY: ${{ secrets.EVENTRELAY_API_KEY || 'er_ci_test_key_123' }}
         ports:
           - 5432:5432
         options: >-

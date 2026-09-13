@@ -21,12 +21,14 @@ EventRelay is an asynchronous webhook delivery gateway built with TypeScript, Po
 
 ```mermaid
 flowchart TD
-    Client[Client / Service] -->|POST /api/events with Idempotency-Key| API[API Gateway]
+    Client[Client / Service] -->|POST /api/events with API Key + Idempotency-Key| API[API Gateway]
 
-    subgraph Ingestion
-        API -->|Insert + Check Idempotency| PG[(PostgreSQL)]
-        API -->|FNV-1a Hash on orderingKey| Shard[Virtual Stream Partitioner]
-        Shard -->|XADD| RS[(Redis Streams)]
+    subgraph Security & Ingestion
+        API --> Auth[Timing-Safe API Key Auth]
+        Auth --> InboundRL[Inbound Token Bucket Rate Limiter]
+        InboundRL -->|Insert + Check Idempotency| PG[(PostgreSQL)]
+        InboundRL -->|FNV-1a Hash on orderingKey| Shard[Virtual Stream Partitioner]
+        Shard -->|XADD| RS[(Redis Streams 8 Shards)]
     end
 
     subgraph Dispatch Fleet
@@ -36,15 +38,17 @@ flowchart TD
     end
 
     subgraph Resilience
-        W1 --> TB[Token Bucket Rate Limiter]
-        W1 --> CB[Circuit Breaker]
+        W1 --> TB[Outbound Destination Rate Limiter]
+        W1 --> CB[Circuit Breaker FSM]
         W1 --> HMAC[HMAC-SHA256 Signer]
     end
 
-    subgraph Destination
+    subgraph Destination & Recovery
         HMAC -->|HTTP POST| Target[Webhook Endpoint]
-        Target -->|5xx / Timeout| Retry[Full Jitter Retry Queue]
-        Retry -->|Max Attempts Reached| DLQ[(Dead Letter Queue)]
+        Target -->|5xx / Timeout| PGRetry[(Postgres Retrying State)]
+        Sched[Background Retry Scheduler] -->|Poll Due Retries| PGRetry
+        Sched -->|Re-enqueue with Jitter + orderingKey| RS
+        Sched -->|Exceeded Max Retries| DLQ[(Dead Letter Queue)]
     end
 ```
 
@@ -57,32 +61,46 @@ Events for the same account or resource often require strict execution order (fo
 - Incoming events provide an `orderingKey`.
 - A 32-bit FNV-1a hash maps this key to one of 8 virtual stream shards (`eventrelay:stream:shard:{0..7}`).
 - Shards are consumed sequentially by worker threads, preserving in-order delivery per entity while running distinct entities concurrently.
+- Manual delivery replays (`POST /api/deliveries/:id/replay`) query the original event's `ordering_key` to republish into the exact same shard.
 
-### 2. Circuit Breaker
+### 2. Security Boundary: Timing-Safe API Key Auth & Inbound Throttling
+Mutating gateway operations (`POST /api/events`, `POST /api/endpoints`, DLQ replay, circuit resets) are guarded by enterprise security controls:
+- **Timing-Safe Key Verification**: Uses `crypto.timingSafeEqual` against `EVENTRELAY_API_KEY` (via `X-API-Key` or `Authorization: Bearer`) to defend against side-channel timing attacks.
+- **Inbound Rate Limiter**: A sliding-window token bucket throttles ingestion requests per caller (IP or API Key) to prevent socket starvation and queue flooding.
+- **Non-Root Container Security**: Docker images run as the unprivileged `node` user (`UID 1000`).
+
+### 3. Automated Background Retry Engine
+Failed deliveries transition to `RETRYING` with an exponential backoff timestamp. A background `RetryScheduler` actively processes the retry pipeline:
+- Polls PostgreSQL every 3 seconds for due retries (`status = 'RETRYING' AND next_retry_at <= NOW()`).
+- Re-enqueues deliveries into their deterministic stream shard using Full Jitter backoff.
+- Automatically transitions deliveries exceeding `max_retries` to `DEAD_LETTER` state and emits Prometheus counter alerts.
+
+### 4. Circuit Breaker Finite State Machine
 When a destination server goes down, delivery threads risk hanging on timeouts and exhausting sockets:
 - **CLOSED**: Normal state. Failed dispatches increment the error counter.
 - **OPEN**: Trips after 5 consecutive failures. Subsequent requests fail immediately without network I/O.
 - **HALF_OPEN**: After a 30-second cooldown, a single probe request is sent. Success resets the circuit to `CLOSED`; failure returns it to `OPEN`.
 
-### 3. HMAC-SHA256 Signing & Replay Defense
+### 5. HMAC-SHA256 Signing & Replay Defense
 Outgoing payloads are signed using the endpoint's pre-shared secret:
 - Header: `X-EventRelay-Signature: t=<timestamp>,v1=<hash>`
 - Receivers verify authenticity and reject signatures older than 300 seconds to prevent replay attacks.
 - Implemented with `crypto.timingSafeEqual` to avoid timing side-channel leaks.
 
-### 4. Exponential Backoff with Full Jitter
+### 6. Exponential Backoff with Full Jitter
 To prevent retrying workers from overloading recovering services at regular intervals (the thundering herd problem), retry delays use full jitter:
 ```
 delay = random(1, min(maxSeconds, baseSeconds * 2 ^ attempt))
 ```
 
-### 5. Prometheus Observability
+### 7. Prometheus Observability
 The server exposes Prometheus-compatible metrics on `/metrics`:
 - `eventrelay_events_ingested_total` (counter by event_type)
 - `eventrelay_deliveries_total` (counter by endpoint and status)
 - `eventrelay_delivery_duration_seconds` (histogram with latency buckets)
 - `eventrelay_circuit_breaker_state` (gauge: 0=CLOSED, 1=HALF_OPEN, 2=OPEN)
 - `eventrelay_dlq_total` (counter for dead-lettered messages)
+- `eventrelay_ratelimiter_errors_total` (counter for rate limiter degradation)
 
 ---
 

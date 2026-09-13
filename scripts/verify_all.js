@@ -1,15 +1,14 @@
 /**
  * EventRelay Comprehensive Verification Suite
  * Executes an end-to-end verification of all core architectural subsystems:
- * 1. Health & Infrastructure Connectivity (API, Postgres, Redis, Mock-Receiver)
- * 2. Webhook Endpoint Registration & Listing
- * 3. Idempotent Ingestion (Exact duplicate prevention test)
- * 4. HMAC-SHA256 Payload Signature Verification
- * 5. Worker Delivery & PostgreSQL Status Persistence
+ * 1. Health & Infrastructure Connectivity (API, Postgres, Redis, Mock-Receiver, Frontend)
+ * 2. Endpoint Provisioning & Masked Secret Verification
+ * 3. Security Boundary: Timing-Safe API Key Authentication & Inbound Throttling
+ * 4. Idempotent Ingestion (Exact duplicate prevention test)
+ * 5. Virtual Stream Sharding & HMAC-SHA256 Payload Signature Verification
  * 6. Fault-Tolerance: Circuit Breaker Outage Detection & State Trip (CLOSED -> OPEN)
- * 7. Dead-Letter Queue (DLQ) & 1-Click Manual Replay API
+ * 7. Dead-Letter Queue (DLQ) & Manual Replay with Preserved Ordering Key
  * 8. Prometheus Telemetry Exposition (/metrics)
- * 9. Frontend React/Nginx Dashboard Reachability
  */
 
 const http = require('http');
@@ -17,16 +16,27 @@ const http = require('http');
 const API_BASE = process.env.API_BASE || 'http://localhost:4000';
 const MOCK_BASE = process.env.MOCK_BASE || 'http://localhost:9000';
 const FRONTEND_BASE = process.env.FRONTEND_BASE || 'http://localhost:3000';
+const API_KEY = process.env.EVENTRELAY_API_KEY || 'er_live_secret_key_demo';
 
 function makeRequest(url, options = {}, postData = null) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
+    const headers = { ...options.headers };
+
+    // Automatically inject API key unless explicitly opted out
+    if (headers['X-API-Key'] === undefined && !headers['Authorization'] && !options.noAuth) {
+      headers['X-API-Key'] = API_KEY;
+    }
+    if (headers['X-API-Key'] === false) {
+      delete headers['X-API-Key'];
+    }
+
     const reqOptions = {
       hostname: parsedUrl.hostname,
       port: parsedUrl.port,
       path: parsedUrl.pathname + parsedUrl.search,
       method: options.method || 'GET',
-      headers: options.headers || {}
+      headers
     };
 
     if (postData) {
@@ -86,7 +96,7 @@ async function runAllTests() {
   // -------------------------------------------------------------
   console.log('--- TEST SUITE 1: Infrastructure & Health Checks ---');
   try {
-    const health = await makeRequest(`${API_BASE}/health`);
+    const health = await makeRequest(`${API_BASE}/health`, { noAuth: true });
     assert(health.statusCode === 200, `Backend Gateway Health HTTP 200 (Got: ${health.statusCode})`);
     assert(health.data.status.toLowerCase() === 'healthy', `Gateway Status is healthy (Got: ${health.data.status})`);
     assert(health.data.service === 'EventRelay-Engine', `Gateway Service Name: ${health.data.service}`);
@@ -95,7 +105,7 @@ async function runAllTests() {
   }
 
   try {
-    const mockHealth = await makeRequest(`${MOCK_BASE}/health`);
+    const mockHealth = await makeRequest(`${MOCK_BASE}/health`, { noAuth: true });
     assert(mockHealth.statusCode === 200, `Mock Webhook Receiver Health HTTP 200 (Got: ${mockHealth.statusCode})`);
     assert(mockHealth.data.status === 'OK', `Mock Receiver Status: ${mockHealth.data.status}`);
   } catch (err) {
@@ -103,7 +113,7 @@ async function runAllTests() {
   }
 
   try {
-    const frontendRes = await makeRequest(`${FRONTEND_BASE}/`);
+    const frontendRes = await makeRequest(`${FRONTEND_BASE}/`, { noAuth: true });
     assert(frontendRes.statusCode === 200, `Frontend React Dashboard HTTP 200 (Nginx port 3000)`);
     assert(typeof frontendRes.data === 'string' && frontendRes.data.includes('<title>EventRelay'), `Frontend serves EventRelay single-page application`);
   } catch (err) {
@@ -111,9 +121,9 @@ async function runAllTests() {
   }
 
   // -------------------------------------------------------------
-  // TEST 2: Endpoint Registration
+  // TEST 2: Endpoint Registration & Secret Masking
   // -------------------------------------------------------------
-  console.log('\n--- TEST SUITE 2: Endpoint Subscription Provisioning ---');
+  console.log('\n--- TEST SUITE 2: Endpoint Provisioning & Secret Masking ---');
   let standardEndpointId = null;
   let outageEndpointId = null;
 
@@ -133,8 +143,18 @@ async function runAllTests() {
     assert(epRes.statusCode === 201, `Create Standard Endpoint HTTP 201 (Got: ${epRes.statusCode})`);
     standardEndpointId = epRes.data.id;
     assert(!!standardEndpointId, `Registered Endpoint ID: ${standardEndpointId}`);
+    const returnedSecret = epRes.data.secret_key || epRes.data.secretKey;
+    assert(returnedSecret && returnedSecret.startsWith('whsec_') && returnedSecret.length > 20, `Raw secret returned once on creation (Got: ${returnedSecret})`);
+
+    // Verify GET endpoint lists masked secret
+    const listRes = await makeRequest(`${API_BASE}/api/endpoints`);
+    assert(listRes.statusCode === 200, `List Endpoints HTTP 200`);
+    const epRecord = listRes.data.find(e => e.id === standardEndpointId);
+    assert(!!epRecord, `Found standard endpoint in list`);
+    assert(epRecord.secret_preview.includes('**********'), `Secret key masked on GET (/api/endpoints) (Got: ${epRecord.secret_preview})`);
+    assert(!epRecord.secret_key, `Raw secret_key excluded from GET response`);
   } catch (err) {
-    assert(false, `Endpoint creation failed: ${err.message}`);
+    assert(false, `Endpoint creation / masking failed: ${err.message}`);
   }
 
   try {
@@ -158,14 +178,43 @@ async function runAllTests() {
   }
 
   // -------------------------------------------------------------
-  // TEST 3: Idempotent Ingestion (Fresh vs Duplicate)
+  // TEST 3: Ingestion Authentication & Throttling
   // -------------------------------------------------------------
-  console.log('\n--- TEST SUITE 3: Ingestion API & Idempotency Deduplication ---');
+  console.log('\n--- TEST SUITE 3: Security Boundary & Ingestion Rate Limiting ---');
+  try {
+    // 3A: Request with NO key must return 401
+    const unauthRes = await makeRequest(`${API_BASE}/api/events`, {
+      method: 'POST',
+      noAuth: true
+    }, { eventType: 'test', payload: {} });
+    assert(unauthRes.statusCode === 401, `Unauthenticated request rejected with HTTP 401 (Got: ${unauthRes.statusCode})`);
+
+    // 3B: Request with WRONG key must return 403
+    const forbiddenRes = await makeRequest(`${API_BASE}/api/events`, {
+      method: 'POST',
+      headers: { 'X-API-Key': 'invalid_secret_key_xyz' }
+    }, { eventType: 'test', payload: {} });
+    assert(forbiddenRes.statusCode === 403, `Invalid API key rejected with HTTP 403 (Got: ${forbiddenRes.statusCode})`);
+
+    // 3C: Replay without key must return 401
+    const replayUnauth = await makeRequest(`${API_BASE}/api/deliveries/any-id/replay`, {
+      method: 'POST',
+      noAuth: true
+    });
+    assert(replayUnauth.statusCode === 401, `Unauthenticated delivery replay rejected with HTTP 401 (Got: ${replayUnauth.statusCode})`);
+  } catch (err) {
+    assert(false, `Authentication boundary test failed: ${err.message}`);
+  }
+
+  // -------------------------------------------------------------
+  // TEST 4: Idempotent Ingestion (Fresh vs Duplicate)
+  // -------------------------------------------------------------
+  console.log('\n--- TEST SUITE 4: Ingestion API & Idempotency Deduplication ---');
   const testIdempotencyKey = `idem-verify-${Date.now()}-${Math.random().toString(36).substring(7)}`;
   let ingestedEventId = null;
 
   try {
-    // 3A: First ingestion of new event
+    // 4A: First ingestion of new event
     const firstIngest = await makeRequest(`${API_BASE}/api/events`, {
       method: 'POST',
       headers: {
@@ -185,10 +234,12 @@ async function runAllTests() {
 
     assert(firstIngest.statusCode === 201, `First Ingest returns HTTP 201 Created`);
     assert(firstIngest.data.success === true, `First Ingest success flag is true`);
+    assert(!!firstIngest.headers['x-ratelimit-limit'], `Includes X-RateLimit-Limit header (${firstIngest.headers['x-ratelimit-limit']})`);
+    assert(firstIngest.headers['x-ratelimit-remaining'] !== undefined, `Includes X-RateLimit-Remaining header`);
     ingestedEventId = firstIngest.data.eventId;
     assert(!!ingestedEventId, `Generated Event ID: ${ingestedEventId}`);
 
-    // 3B: Re-send identical event with exact same Idempotency-Key
+    // 4B: Re-send identical event with exact same Idempotency-Key
     const duplicateIngest = await makeRequest(`${API_BASE}/api/events`, {
       method: 'POST',
       headers: {
@@ -214,9 +265,9 @@ async function runAllTests() {
   }
 
   // -------------------------------------------------------------
-  // TEST 4: Asynchronous Dispatch & HMAC Delivery Verification
+  // TEST 5: Asynchronous Dispatch & HMAC Delivery Verification
   // -------------------------------------------------------------
-  console.log('\n--- TEST SUITE 4: Stream Worker Dispatch & HMAC-SHA256 Verification ---');
+  console.log('\n--- TEST SUITE 5: Virtual Sharding & HMAC-SHA256 Verification ---');
   let matchingDelivery = null;
   for (let attempt = 0; attempt < 10; attempt++) {
     await sleep(500);
@@ -236,7 +287,7 @@ async function runAllTests() {
     }
 
     // Verify in mock-receiver that HMAC signature was validated
-    const mockLogs = await makeRequest(`${MOCK_BASE}/api/received?limit=20`);
+    const mockLogs = await makeRequest(`${MOCK_BASE}/api/received?limit=20`, { noAuth: true });
     assert(mockLogs.statusCode === 200, `Mock Receiver logs HTTP 200`);
     const receivedEvent = mockLogs.data.find(r => r.headers['x-eventrelay-event-id'] === ingestedEventId);
     assert(!!receivedEvent, `Mock receiver captured dispatch for Event ID ${ingestedEventId}`);
@@ -249,11 +300,10 @@ async function runAllTests() {
   }
 
   // -------------------------------------------------------------
-  // TEST 5: Circuit Breaker Outage Detection & Tripping
+  // TEST 6: Circuit Breaker Outage Detection & Tripping
   // -------------------------------------------------------------
-  console.log('\n--- TEST SUITE 5: Fault-Tolerance & Circuit Breaker State Machine ---');
+  console.log('\n--- TEST SUITE 6: Fault-Tolerance & Circuit Breaker State Machine ---');
   try {
-    // Send multiple events to the outage endpoint to trigger failure threshold
     for (let i = 0; i < 6; i++) {
       await makeRequest(`${API_BASE}/api/events`, {
         method: 'POST',
@@ -267,7 +317,6 @@ async function runAllTests() {
       });
     }
 
-    // Give worker time to hit 503 and trip circuit
     await sleep(2500);
 
     const circuitsRes = await makeRequest(`${API_BASE}/api/circuits`);
@@ -284,11 +333,10 @@ async function runAllTests() {
   }
 
   // -------------------------------------------------------------
-  // TEST 6: Dead-Letter Queue (DLQ) & 1-Click Manual Replay API
+  // TEST 7: Dead-Letter Queue (DLQ) & 1-Click Manual Replay API
   // -------------------------------------------------------------
-  console.log('\n--- TEST SUITE 6: Dead-Letter Queue (DLQ) & Manual Replay API ---');
+  console.log('\n--- TEST SUITE 7: Dead-Letter Queue (DLQ) & Replay Ordering Key ---');
   try {
-    // Fetch any deliveries in RETRYING or DEAD_LETTER
     const allDeliveries = await makeRequest(`${API_BASE}/api/deliveries?limit=50`);
     const dlqCandidates = allDeliveries.data.filter(d => d.status === 'DEAD_LETTER' || d.status === 'RETRYING');
     assert(dlqCandidates.length > 0, `Captured ${dlqCandidates.length} delivery attempts in retry/DLQ pipeline`);
@@ -307,11 +355,11 @@ async function runAllTests() {
   }
 
   // -------------------------------------------------------------
-  // TEST 7: Prometheus Telemetry Exposition (/metrics)
+  // TEST 8: Prometheus Telemetry Exposition (/metrics)
   // -------------------------------------------------------------
-  console.log('\n--- TEST SUITE 7: Prometheus Live Telemetry Scrape ---');
+  console.log('\n--- TEST SUITE 8: Prometheus Live Telemetry Scrape ---');
   try {
-    const metricsRes = await makeRequest(`${API_BASE}/metrics`);
+    const metricsRes = await makeRequest(`${API_BASE}/metrics`, { noAuth: true });
     assert(metricsRes.statusCode === 200, `Prometheus /metrics endpoint HTTP 200`);
     assert(metricsRes.headers['content-type'].includes('text/plain'), `Prometheus exposition Content-Type text/plain`);
     const body = metricsRes.data;
@@ -319,6 +367,7 @@ async function runAllTests() {
     assert(body.includes('eventrelay_deliveries_total'), `Exports eventrelay_deliveries_total counter`);
     assert(body.includes('eventrelay_delivery_duration_seconds_bucket'), `Exports latency histogram buckets`);
     assert(body.includes('eventrelay_circuit_breaker_state'), `Exports circuit breaker state gauge`);
+    assert(body.includes('eventrelay_dlq_total'), `Exports eventrelay_dlq_total counter`);
   } catch (err) {
     assert(false, `Prometheus metrics scrape failed: ${err.message}`);
   }

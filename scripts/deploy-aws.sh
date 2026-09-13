@@ -45,23 +45,40 @@ else
   cd EventRelay
 fi
 
-# 4. Spin up all multi-container services with Docker Compose
-echo "[4/6] Building and launching containers (PostgreSQL, Redis, Backend, Frontend, Mock Receiver)..."
+# 4. Generate Production .env if not present
+if [ ! -f .env ]; then
+  echo "[4/6] Generating secure random production credentials in .env..."
+  RANDOM_KEY=$(openssl rand -hex 16)
+  PG_PASS=$(openssl rand -hex 12)
+  cat <<EOF > .env
+POSTGRES_USER=eventrelay
+POSTGRES_PASSWORD=${PG_PASS}
+POSTGRES_DB=eventrelay_db
+EVENTRELAY_API_KEY=${RANDOM_KEY}
+PORT=4000
+NODE_ENV=production
+EOF
+fi
+
+# 5. Spin up all multi-container services with Docker Compose
+echo "[5/6] Building and launching containers (PostgreSQL, Redis, Backend, Frontend, Mock Receiver)..."
 sudo docker compose down || true
 sudo docker compose up -d --build
 
-# 5. Wait for healthchecks
-echo "[5/6] Waiting for services to initialize..."
+# 6. Wait for healthchecks
+echo "[6/6] Waiting for services to initialize..."
 sleep 12
 
-# 6. Fetch Public IP
+# Fetch Public IP & API Key
 PUBLIC_IP=$(curl -s http://checkip.amazonaws.com || curl -s https://api.ipify.org || echo "YOUR_EC2_PUBLIC_IP")
+ACTIVE_KEY=$(grep EVENTRELAY_API_KEY .env | cut -d '=' -f2 || echo "er_live_secret_key_demo")
 
 echo "=================================================="
 echo "  🎉 EventRelay Successfully Deployed on AWS EC2!"
 echo "=================================================="
 echo "  • React Dashboard:       http://${PUBLIC_IP}:3000"
 echo "  • Event Ingestion API:   http://${PUBLIC_IP}:4000/api/events"
+echo "  • Ingestion API Key:     ${ACTIVE_KEY}"
 echo "  • Healthcheck:           http://${PUBLIC_IP}:4000/health"
 echo "  • Prometheus Metrics:    http://${PUBLIC_IP}:4000/metrics"
 echo "  • Mock Webhook Receiver: http://${PUBLIC_IP}:9000/webhook/success"

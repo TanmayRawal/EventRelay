@@ -10,11 +10,16 @@ import { streamQueue } from './redis/streamQueue';
 import { deliveryWorker } from './worker/deliveryWorker';
 import { retryScheduler } from './worker/retryScheduler';
 import { requireApiKey } from './middleware/auth';
+import { inboundRateLimiter } from './middleware/rateLimit';
 import { metrics } from './metrics/prometheus';
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: config.corsOrigin === '*' ? '*' : config.corsOrigin.split(',').map(s => s.trim()),
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'Idempotency-Key', 'X-Correlation-ID']
+}));
 app.use(express.json());
 
 // Correlation ID & Distributed Tracing Middleware
@@ -42,7 +47,7 @@ app.get('/metrics', (req, res) => {
 });
 
 // Event APIs
-app.post('/api/events', requireApiKey, ingestEvent);
+app.post('/api/events', requireApiKey, inboundRateLimiter, ingestEvent);
 app.get('/api/events', listEvents);
 
 // Endpoint APIs

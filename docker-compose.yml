@@ -4,16 +4,16 @@ services:
     container_name: eventrelay-postgres
     restart: always
     environment:
-      POSTGRES_USER: eventrelay
-      POSTGRES_PASSWORD: eventrelay_secret
-      POSTGRES_DB: eventrelay_db
+      POSTGRES_USER: ${POSTGRES_USER:-eventrelay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-eventrelay_db}
     ports:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/src/db/schema.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U eventrelay -d eventrelay_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eventrelay} -d ${POSTGRES_DB:-eventrelay_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -41,8 +41,10 @@ services:
     restart: always
     environment:
       PORT: 4000
-      DATABASE_URL: postgres://eventrelay:eventrelay_secret@postgres:5432/eventrelay_db
+      DATABASE_URL: postgres://${POSTGRES_USER:-eventrelay}:${POSTGRES_PASSWORD:-postgres_password_dev}@postgres:5432/${POSTGRES_DB:-eventrelay_db}
       REDIS_URL: redis://redis:6379
+      EVENTRELAY_API_KEY: ${EVENTRELAY_API_KEY:-er_live_secret_key_demo}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
       NODE_ENV: production
     ports:
       - "4000:4000"
@@ -56,8 +58,12 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_API_KEY: ${EVENTRELAY_API_KEY:-er_live_secret_key_demo}
     container_name: eventrelay-frontend
     restart: always
+    environment:
+      VITE_API_KEY: ${EVENTRELAY_API_KEY:-er_live_secret_key_demo}
     ports:
       - "3000:80"
     depends_on:

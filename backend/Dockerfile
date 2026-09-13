@@ -12,5 +12,8 @@ COPY package*.json ./
 RUN npm ci --only=production
 COPY --from=builder /app/dist ./dist
 
+RUN chown -R node:node /app
+USER node
+
 EXPOSE 4000
 CMD ["node", "dist/index.js"]

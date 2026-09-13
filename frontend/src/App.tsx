@@ -14,6 +14,21 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  // Authentication Key State
+  const [apiKey, setApiKey] = useState<string>(() => {
+    return localStorage.getItem('eventrelay_api_key') || (import.meta as any).env?.VITE_API_KEY || 'er_live_secret_key_demo';
+  });
+
+  const handleUpdateApiKey = (newKey: string) => {
+    setApiKey(newKey);
+    localStorage.setItem('eventrelay_api_key', newKey);
+    showToast(newKey ? 'API Key updated!' : 'API Key cleared');
+  };
+
+  const getAuthHeaders = (): Record<string, string> => {
+    return apiKey ? { 'X-API-Key': apiKey } : {};
+  };
+
   // Test event form state
   const [eventType, setEventType] = useState('order.created');
   const [orderingKey, setOrderingKey] = useState('');
@@ -47,7 +62,15 @@ export default function App() {
   const handleReplay = async (deliveryId: string) => {
     setLoading(true);
     try {
-      await fetch(`/api/deliveries/${deliveryId}/replay`, { method: 'POST' });
+      const res = await fetch(`/api/deliveries/${deliveryId}/replay`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        showToast(`Replay failed: ${errData.error || res.statusText}`);
+        return;
+      }
       showToast(`Manual replay queued: ${deliveryId.slice(0, 8)}...`);
       fetchData();
     } catch {
@@ -59,7 +82,15 @@ export default function App() {
 
   const handleResetCircuit = async (endpointId: string) => {
     try {
-      await fetch(`/api/circuits/${endpointId}/reset`, { method: 'POST' });
+      const res = await fetch(`/api/circuits/${endpointId}/reset`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        showToast(`Reset failed: ${errData.error || res.statusText}`);
+        return;
+      }
       showToast('Circuit breaker reset to CLOSED');
       fetchData();
     } catch {
@@ -76,7 +107,8 @@ export default function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Idempotency-Key': customIdempotency
+          'Idempotency-Key': customIdempotency,
+          ...getAuthHeaders()
         },
         body: JSON.stringify({
           eventType,
@@ -108,7 +140,8 @@ export default function App() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Idempotency-Key': `scenario-happy-${Date.now()}`
+            'Idempotency-Key': `scenario-happy-${Date.now()}`,
+            ...getAuthHeaders()
           },
           body: JSON.stringify({
             eventType: 'order.payment_completed',
@@ -116,7 +149,7 @@ export default function App() {
             orderingKey: 'customer_tanmay@google.com'
           })
         });
-        showToast('✅ Scenario 1: Payment ingested in <4ms, hashed to virtual stream shard, signed with HMAC-SHA256, and delivered 200 OK!');
+        showToast('✅ Scenario 1: Authenticated payment ingested in <4ms, hashed to virtual stream shard, signed with HMAC-SHA256, and delivered 200 OK!');
         setActiveTab('deliveries');
         setTimeout(fetchData, 800);
       } else if (scenario === 'idempotent') {
@@ -130,14 +163,22 @@ export default function App() {
         // First click
         await fetch('/api/events', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': sharedKey },
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': sharedKey,
+            ...getAuthHeaders()
+          },
           body: JSON.stringify(payload)
         });
 
         // Immediate rapid second click
         const secondRes = await fetch('/api/events', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Idempotency-Key': sharedKey },
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': sharedKey,
+            ...getAuthHeaders()
+          },
           body: JSON.stringify(payload)
         });
         const secondData = await secondRes.json();
@@ -158,7 +199,8 @@ export default function App() {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Idempotency-Key': `scenario-outage-${Date.now()}-${i}`
+              'Idempotency-Key': `scenario-outage-${Date.now()}-${i}`,
+              ...getAuthHeaders()
             },
             body: JSON.stringify({
               eventType: 'outage.simulation',
@@ -198,6 +240,8 @@ export default function App() {
         successRate={successRate}
         totalDelivered={deliveries.length}
         dlqCount={dlqDeliveries.length}
+        apiKey={apiKey}
+        onUpdateApiKey={handleUpdateApiKey}
       />
 
       <InteractiveDemoBar
