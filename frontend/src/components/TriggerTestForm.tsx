@@ -48,7 +48,7 @@ export const TriggerTestForm: React.FC<TriggerTestFormProps> = ({
           <label className="block text-xs font-semibold text-slate-300 mb-1">Ordering Key (Optional Virtual Shard Key)</label>
           <input
             type="text"
-            placeholder="e.g. customer_tanmay@google.com or order_123"
+            placeholder="e.g. customer_101@example.com or order_123"
             value={orderingKey}
             onChange={(e) => setOrderingKey(e.target.value)}
             className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 font-mono focus:outline-none focus:border-blue-500"
@@ -82,7 +82,7 @@ export const TriggerTestForm: React.FC<TriggerTestFormProps> = ({
           disabled={loading}
           className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-semibold text-sm rounded-lg transition-colors shadow-lg"
         >
-          {loading ? 'Dispatching to Redis Streams...' : '🚀 Ingest & Queue Webhook Event'}
+          {loading ? 'Dispatching to Redis Streams...' : 'Ingest & Queue Webhook Event'}
         </button>
       </form>
     </div>

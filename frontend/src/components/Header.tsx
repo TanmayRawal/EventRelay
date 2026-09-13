@@ -65,8 +65,12 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           ) : (
             <div className="flex items-center gap-1.5">
-              <span className="font-mono bg-slate-800 px-2 py-0.5 rounded text-emerald-400 border border-slate-700">
-                🔑 {apiKey ? `${apiKey.slice(0, 10)}••••••••` : 'None (Open Mode)'}
+              <span className={`font-mono px-2 py-0.5 rounded border text-xs ${
+                apiKey
+                  ? 'bg-slate-800 text-emerald-400 border-slate-700'
+                  : 'bg-slate-800/60 text-slate-400 border-slate-700'
+              }`}>
+                {apiKey ? `${apiKey.slice(0, 10)}••••••••` : 'Unconfigured (Open Mode)'}
               </span>
               <button
                 onClick={() => { setTempKey(apiKey); setIsEditingKey(true); }}

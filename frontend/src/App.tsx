@@ -14,15 +14,15 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Authentication Key State
+  // Authentication Key State (No public hardcoded default)
   const [apiKey, setApiKey] = useState<string>(() => {
-    return localStorage.getItem('eventrelay_api_key') || (import.meta as any).env?.VITE_API_KEY || 'er_live_secret_key_demo';
+    return localStorage.getItem('eventrelay_api_key') || (import.meta as any).env?.VITE_API_KEY || '';
   });
 
   const handleUpdateApiKey = (newKey: string) => {
     setApiKey(newKey);
     localStorage.setItem('eventrelay_api_key', newKey);
-    showToast(newKey ? 'API Key updated!' : 'API Key cleared');
+    showToast(newKey ? 'API Key configured.' : 'API Key cleared (Open mode).');
   };
 
   const getAuthHeaders = (): Record<string, string> => {
@@ -32,12 +32,12 @@ export default function App() {
   // Test event form state
   const [eventType, setEventType] = useState('order.created');
   const [orderingKey, setOrderingKey] = useState('');
-  const [payloadJson, setPayloadJson] = useState('{\n  "orderId": "ORD-9821",\n  "amount": 249.99,\n  "customer": "user@google.com"\n}');
+  const [payloadJson, setPayloadJson] = useState('{\n  "orderId": "ORD-9821",\n  "amount": 249.99,\n  "customer": "alex@example.com"\n}');
   const [customIdempotency, setCustomIdempotency] = useState(`idemp-${Date.now()}`);
 
   const showToast = (msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 3500);
+    setTimeout(() => setToast(null), 4000);
   };
 
   const fetchData = async () => {
@@ -61,20 +61,22 @@ export default function App() {
 
   const handleReplay = async (deliveryId: string) => {
     setLoading(true);
+    const t0 = performance.now();
     try {
       const res = await fetch(`/api/deliveries/${deliveryId}/replay`, {
         method: 'POST',
         headers: getAuthHeaders()
       });
+      const elapsed = Math.round(performance.now() - t0);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        showToast(`Replay failed: ${errData.error || res.statusText}`);
+        showToast(`Replay failed (${res.status}): ${errData.error || res.statusText}`);
         return;
       }
-      showToast(`Manual replay queued: ${deliveryId.slice(0, 8)}...`);
+      showToast(`Replay queued in ${elapsed}ms: delivery ${deliveryId.slice(0, 8)} published to shard partition.`);
       fetchData();
     } catch {
-      showToast('Error triggering replay');
+      showToast('Error triggering delivery replay.');
     } finally {
       setLoading(false);
     }
@@ -88,19 +90,20 @@ export default function App() {
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        showToast(`Reset failed: ${errData.error || res.statusText}`);
+        showToast(`Reset failed (${res.status}): ${errData.error || res.statusText}`);
         return;
       }
-      showToast('Circuit breaker reset to CLOSED');
+      showToast('Circuit breaker administratively reset to CLOSED.');
       fetchData();
     } catch {
-      showToast('Failed to reset circuit');
+      showToast('Failed to reset circuit breaker.');
     }
   };
 
   const handleSendEvent = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    const t0 = performance.now();
     try {
       const parsed = JSON.parse(payloadJson);
       const res = await fetch('/api/events', {
@@ -116,13 +119,18 @@ export default function App() {
           orderingKey: orderingKey.trim() || undefined
         })
       });
+      const elapsed = Math.round(performance.now() - t0);
       const data = await res.json();
       if (res.ok) {
-        showToast(data.duplicate ? 'Duplicate request detected (Idempotent response)!' : 'Event queued for delivery!');
+        showToast(
+          data.duplicate
+            ? `Duplicate request intercepted in ${elapsed}ms: cached response returned.`
+            : `Event ingested in ${elapsed}ms: queued to partition shard.`
+        );
         setCustomIdempotency(`idemp-${Date.now()}`);
         fetchData();
       } else {
-        showToast(`Error: ${data.error || 'Failed to dispatch'}`);
+        showToast(`Request failed (${res.status}): ${data.error || 'Failed to dispatch'}`);
       }
     } catch (err: any) {
       showToast(`Invalid JSON payload: ${err.message}`);
@@ -136,7 +144,8 @@ export default function App() {
     try {
       if (scenario === 'happy') {
         const orderNum = Math.floor(Math.random() * 90000 + 10000);
-        await fetch('/api/events', {
+        const t0 = performance.now();
+        const res = await fetch('/api/events', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -145,19 +154,20 @@ export default function App() {
           },
           body: JSON.stringify({
             eventType: 'order.payment_completed',
-            payload: { orderId: `ORD-${orderNum}`, amount: 149.99, currency: 'USD', customer: 'tanmay@google.com' },
-            orderingKey: 'customer_tanmay@google.com'
+            payload: { orderId: `ORD-${orderNum}`, amount: 149.99, currency: 'USD', customer: 'customer_101@example.com' },
+            orderingKey: 'customer_101@example.com'
           })
         });
-        showToast('✅ Scenario 1: Authenticated payment ingested in <4ms, hashed to virtual stream shard, signed with HMAC-SHA256, and delivered 200 OK!');
+        const elapsed = Math.round(performance.now() - t0);
+        showToast(`Scenario 1: Payment ingested in ${elapsed}ms (HTTP ${res.status}). Sharded via FNV-1a with HMAC-SHA256 signature.`);
         setActiveTab('deliveries');
         setTimeout(fetchData, 800);
       } else if (scenario === 'idempotent') {
-        const sharedKey = `double-click-guard-${Date.now()}`;
+        const sharedKey = `idemp-guard-${Date.now()}`;
         const payload = {
           eventType: 'order.payment_completed',
-          payload: { orderId: 'ORD-DOUBLE-CHARGE-TEST', amount: 999.00, customer: 'shopper@store.com' },
-          orderingKey: 'shopper@store.com'
+          payload: { orderId: 'ORD-DUP-TEST', amount: 999.00, customer: 'shopper_42@example.com' },
+          orderingKey: 'shopper_42@example.com'
         };
 
         // First click
@@ -172,6 +182,7 @@ export default function App() {
         });
 
         // Immediate rapid second click
+        const t1 = performance.now();
         const secondRes = await fetch('/api/events', {
           method: 'POST',
           headers: {
@@ -181,18 +192,20 @@ export default function App() {
           },
           body: JSON.stringify(payload)
         });
+        const elapsed = Math.round(performance.now() - t1);
         const secondData = await secondRes.json();
 
         if (secondData.duplicate) {
-          showToast('🛡️ Scenario 2 Idempotency: Rapid duplicate click intercepted! 2nd request returned cached 200 OK in 1ms. Exactly ZERO duplicate charges created!');
+          showToast(`Scenario 2: Duplicate key intercepted in ${elapsed}ms. Cached response returned with 0 duplicate executions.`);
         } else {
-          showToast('Event ingested successfully.');
+          showToast(`Scenario 2: Event ingested in ${elapsed}ms.`);
         }
         setActiveTab('deliveries');
         setTimeout(fetchData, 800);
       } else if (scenario === 'circuit') {
         const outageEp = endpoints.find(e => e.url.includes('failing') || e.name.toLowerCase().includes('outage'));
         const endpointIds = outageEp ? [outageEp.id] : undefined;
+        const t0 = performance.now();
 
         for (let i = 0; i < 5; i++) {
           await fetch('/api/events', {
@@ -204,21 +217,24 @@ export default function App() {
             },
             body: JSON.stringify({
               eventType: 'outage.simulation',
-              payload: { batch: i, reason: 'partner server 503 outage' },
+              payload: { batch: i, reason: 'downstream 503 outage' },
               endpointIds
             })
           });
         }
-        showToast('⚡ Scenario 3 Circuit Breaker: Target endpoint returned 503 Outage! Circuit Breaker TRIPPED to OPEN. Subsequent requests fast-fail in 0ms to protect system resources.');
+        const elapsed = Math.round(performance.now() - t0);
+        showToast(`Scenario 3: 5 consecutive downstream failures observed (${elapsed}ms). Circuit breaker state TRIPPED to OPEN.`);
         setActiveTab('endpoints');
         setTimeout(fetchData, 1500);
       } else if (scenario === 'dlq') {
         const candidate = deliveries.find(d => d.status === 'DEAD_LETTER' || d.status === 'RETRYING');
         if (candidate) {
+          const t0 = performance.now();
           await handleReplay(candidate.id);
-          showToast(`🔄 Scenario 4 DLQ Replay: Delivery ${candidate.id.slice(0, 8)} revived from DLQ, attempt counter reset to 1, and re-queued into Redis Streams.`);
+          const elapsed = Math.round(performance.now() - t0);
+          showToast(`Scenario 4: Delivery ${candidate.id.slice(0, 8)} re-enqueued to stream shard in ${elapsed}ms with attempt reset to 1.`);
         } else {
-          showToast('No DLQ candidates found. Click Scenario 3 first to generate a failed delivery!');
+          showToast('No DLQ deliveries found. Trigger Scenario 3 first to generate failed deliveries.');
         }
         setActiveTab('deliveries');
         setTimeout(fetchData, 800);
@@ -250,9 +266,9 @@ export default function App() {
       />
 
       {toast && (
-        <div className="my-4 px-4 py-2.5 bg-blue-900/90 border border-blue-400 text-blue-100 rounded-lg text-sm flex items-center justify-between shadow-lg animate-fade-in">
+        <div className="my-4 px-4 py-2.5 bg-slate-900 border border-blue-500/60 text-slate-200 rounded-lg text-sm flex items-center justify-between shadow-xl animate-fade-in font-mono text-xs">
           <span className="font-medium">{toast}</span>
-          <button onClick={() => setToast(null)} className="text-blue-300 hover:text-white font-bold text-sm ml-4">✕</button>
+          <button onClick={() => setToast(null)} className="text-slate-400 hover:text-white font-bold text-sm ml-4">✕</button>
         </div>
       )}
 

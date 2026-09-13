@@ -16,7 +16,7 @@ const http = require('http');
 const API_BASE = process.env.API_BASE || 'http://localhost:4000';
 const MOCK_BASE = process.env.MOCK_BASE || 'http://localhost:9000';
 const FRONTEND_BASE = process.env.FRONTEND_BASE || 'http://localhost:3000';
-const API_KEY = process.env.EVENTRELAY_API_KEY || 'er_live_secret_key_demo';
+const API_KEY = process.env.EVENTRELAY_API_KEY || 'er_secure_local_dev_key_8921';
 
 function makeRequest(url, options = {}, postData = null) {
   return new Promise((resolve, reject) => {

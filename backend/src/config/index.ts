@@ -18,7 +18,7 @@ export const config = {
   port: parseInt(process.env.PORT || '4000', 10),
   databaseUrl: getDatabaseUrl(),
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
-  apiKey: process.env.EVENTRELAY_API_KEY !== undefined ? (process.env.EVENTRELAY_API_KEY || null) : 'er_live_secret_key_demo',
+  apiKey: process.env.EVENTRELAY_API_KEY ? process.env.EVENTRELAY_API_KEY.trim() : null,
   corsOrigin: process.env.CORS_ORIGIN || '*',
   ingestionRateLimitRps: parseInt(process.env.INGESTION_RATE_LIMIT_RPS || '200', 10),
   rateLimiterFailClosed: process.env.RATE_LIMITER_FAIL_CLOSED === 'true',

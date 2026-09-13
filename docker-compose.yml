@@ -43,7 +43,7 @@ services:
       PORT: 4000
       DATABASE_URL: postgres://${POSTGRES_USER:-eventrelay}:${POSTGRES_PASSWORD:-postgres_password_dev}@postgres:5432/${POSTGRES_DB:-eventrelay_db}
       REDIS_URL: redis://redis:6379
-      EVENTRELAY_API_KEY: ${EVENTRELAY_API_KEY:-er_live_secret_key_demo}
+      EVENTRELAY_API_KEY: ${EVENTRELAY_API_KEY:-}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       NODE_ENV: production
     ports:
@@ -59,11 +59,11 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_KEY: ${EVENTRELAY_API_KEY:-er_live_secret_key_demo}
+        VITE_API_KEY: ${EVENTRELAY_API_KEY:-}
     container_name: eventrelay-frontend
     restart: always
     environment:
-      VITE_API_KEY: ${EVENTRELAY_API_KEY:-er_live_secret_key_demo}
+      VITE_API_KEY: ${EVENTRELAY_API_KEY:-}
     ports:
       - "3000:80"
     depends_on:

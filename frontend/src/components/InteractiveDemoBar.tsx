@@ -14,11 +14,11 @@ export const InteractiveDemoBar: React.FC<InteractiveDemoBarProps> = ({ loading,
           <div className="flex items-center gap-2">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
             <h2 className="text-sm font-bold text-white tracking-wide uppercase">
-              Interactive Live Demo — Try Scenarios in 1-Click
+              Operational Scenarios — Live Demonstration
             </h2>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Click any button below to see how EventRelay solves real distributed systems failures in real time:
+            Trigger distributed edge conditions to observe gateway partition sharding, deduplication, and failover:
           </p>
         </div>
         <span className="text-xs font-mono text-blue-400 self-start sm:self-center bg-blue-950/80 px-2 py-1 rounded border border-blue-800">
@@ -38,10 +38,10 @@ export const InteractiveDemoBar: React.FC<InteractiveDemoBarProps> = ({ loading,
             <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 font-mono font-semibold">200 OK</span>
           </div>
           <div className="text-sm font-semibold text-white mt-1 group-hover:text-emerald-300">
-            Happy Path Payment
+            Happy Path Dispatch
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Signs payload with HMAC-SHA256 and dispatches in &lt;5ms.
+            Signs payload with HMAC-SHA256 and dispatches via virtual shard.
           </p>
         </button>
 
@@ -56,10 +56,10 @@ export const InteractiveDemoBar: React.FC<InteractiveDemoBarProps> = ({ loading,
             <span className="text-xs px-1.5 py-0.5 rounded bg-amber-950 text-amber-300 font-mono font-semibold">Deduplicated</span>
           </div>
           <div className="text-sm font-semibold text-white mt-1 group-hover:text-amber-300">
-            Double-Click Guard
+            Idempotent Request
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Fires duplicate key; blocks 2nd charge with zero duplicate inserts.
+            Fires identical key; returns cached response with zero duplicate writes.
           </p>
         </button>
 
@@ -77,7 +77,7 @@ export const InteractiveDemoBar: React.FC<InteractiveDemoBarProps> = ({ loading,
             Simulate 503 Outage
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Fires 5 errors; trips circuit to OPEN to fast-fail in 0ms.
+            Fires 5 errors; trips circuit breaker to OPEN to fast-fail downstream calls.
           </p>
         </button>
 
@@ -89,13 +89,13 @@ export const InteractiveDemoBar: React.FC<InteractiveDemoBarProps> = ({ loading,
         >
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-purple-400 uppercase">Scenario 4</span>
-            <span className="text-xs px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 font-mono font-semibold">1-Click Fix</span>
+            <span className="text-xs px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 font-mono font-semibold">Replay Job</span>
           </div>
           <div className="text-sm font-semibold text-white mt-1 group-hover:text-purple-300">
-            DLQ Manual Replay
+            DLQ Delivery Replay
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Re-enqueues dead-lettered webhooks once partner recovers.
+            Re-enqueues dead-lettered job preserving its deterministic stream shard.
           </p>
         </button>
       </div>
